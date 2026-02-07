@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MousePlotter</title>
+
+    <!--
+      To get timer precision beyond ~100us in Chrome, you MUST serve this page with:
+        Cross-Origin-Opener-Policy: same-origin
+        Cross-Origin-Embedder-Policy: require-corp
+      (and ensure all subresources are COEP-compatible)
+
+      This cannot be done via <meta http-equiv>; it must be HTTP response headers.
+    -->
+
+    <!-- COEP-friendly CORS fetch for the CDN script -->
+    <script
+      src="https://cdn.plot.ly/plotly-2.27.0.min.js"
+      crossorigin="anonymous"
+    ></script>
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <div class="topbar">
+        <div class="brand">
+          <div class="brand__title">MousePlotter</div>
+        </div>
+
+        <div class="controls-grid">
+          <div class="panel panel--record">
+            <div
+              id="statusIndicator"
+              role="status"
+              aria-live="polite"
+            >
+              Click & hold or Space
+            </div>
+            <div class="record-row">
+              <div
+                class="segmented"
+                role="group"
+                aria-label="Event API"
+              >
+                <label class="segmented__item">
+                  <input
+                    type="radio"
+                    name="api"
+                    value="pointerrawupdate"
+                    checked
+                    id="radioRaw"
+                  />
+                  <span id="rawApiText">pointerrawupdate</span>
+                </label>
+                <label class="segmented__item">
+                  <input
+                    type="radio"
+                    name="api"
+                    value="pointermove"
+                  />
+                  <span>pointermove</span>
+                </label>
+              </div>
+              <span class="badge" id="timerResolutionIndicator"
+              >Timer resolution: …</span>
+            </div>
+          </div>
+
+          <div class="panel panel--mid">
+            <div class="mid-section mid-section--summary">
+              <div class="panel__header">Summary</div>
+              <div class="mid-summary-row">
+                <div class="summary-item">
+                  <div class="stat-label">Events</div>
+                  <div class="stat-value" id="statEvents">
+                    0
+                  </div>
+                </div>
+                <div class="summary-item">
+                  <div class="stat-label">Total X</div>
+                  <div class="stat-value" id="statTotalX">
+                    0
+                  </div>
+                </div>
+                <div class="summary-item">
+                  <div class="stat-label">Total Y</div>
+                  <div class="stat-value" id="statTotalY">
+                    0
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mid-section mid-section--settings">
+              <div class="panel__header">Settings</div>
+              <div class="mid-settings-row">
+                <div class="setting">
+                  <label for="periodSelect">Minimum Period</label>
+                  <select
+                    id="periodSelect"
+                    class="stat-value"
+                  >
+                    <option value="auto" selected>
+                      auto (125µs)
+                    </option>
+                    <option value="0.125">125µs</option>
+                    <option value="0.25">250µs</option>
+                    <option value="0.5">500µs</option>
+                    <option value="1">1ms</option>
+                  </select>
+                </div>
+                <div class="setting">
+                  <label for="dpiInput">DPI</label>
+                  <input
+                    id="dpiInput"
+                    class="stat-value"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value="800"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel panel--csv">
+            <div class="panel__header">CSV</div>
+            <div class="button-row">
+              <button
+                class="btn"
+                id="importCsvBtn"
+                type="button"
+              >
+                Import
+              </button>
+              <button
+                class="btn"
+                id="exportCsvBtn"
+                type="button"
+              >
+                Export
+              </button>
+              <input
+                id="importCsvInput"
+                type="file"
+                accept=".csv,text/csv"
+                hidden
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="plot-card">
+        <div id="plot"></div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
