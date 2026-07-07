@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 XBAB Tech, LLC
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ */
+
 const $ = (id) => document.getElementById(id);
 const statusIndicator = $("statusIndicator");
 const statEvents = $("statEvents");
