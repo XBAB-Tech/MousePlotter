@@ -138,7 +138,7 @@ function updateTimerResolutionUI() {
     const resUs = resMs * 1000;
     timerResolutionIndicator.textContent = `Timer resolution: ~${
       resUs.toFixed(resUs < 100 ? 1 : 0)
-    }us`;
+    }µs`;
   } else {
     timerResolutionIndicator.textContent = "Timer resolution: n/a";
   }
@@ -321,13 +321,9 @@ function parseCsv(text) {
   const dpi = parseFloat((rawLines[1] ?? "").trim());
   const dpiVal = Number.isFinite(dpi) && dpi > 0 ? dpi : NaN;
 
-  // Header line (typically: xCount,yCount,Time (ms))
-  const header = (rawLines[2] ?? "").trim();
-  const looksLikeHeader = /xcount/i.test(header) && /ycount/i.test(header) &&
-    /time/i.test(header);
-  if (!looksLikeHeader) {
-    // Still allow import; some files may omit/alter the header.
-  }
+  // Line 3 (index 2) is the column header, typically "xCount,yCount,Time (ms)".
+  // It's never required: data parsing simply starts at the next line, so files
+  // that omit or alter the header still import.
 
   const ts = [];
   const mx = [];
@@ -1368,7 +1364,7 @@ function renderPlot(allowEmpty = false) {
     guessed = guessPeriod(mxTrim, myTrim, tSmoothed);
     const guessedUs = guessed * 1000;
     periodSelect.options[0].textContent = guessedUs < 1000
-      ? `auto (${guessedUs}us)`
+      ? `auto (${guessedUs}µs)`
       : `auto (${guessed}ms)`;
 
     if (tSmoothed.length > 1) {
@@ -1620,13 +1616,18 @@ function plotPngBlob() {
   });
 }
 
-function plotPngFilename() {
-  const nameBase = (plotTitle || "")
+// Sanitize the current plot title into a filesystem-safe filename base.
+// Returns "" when there is no usable title, so callers can pick a fallback.
+function sanitizedTitleBase() {
+  return (plotTitle || "")
     .trim()
     .replace(/[\/\\?%*:|"<>]/g, "")
     .replace(/\s+/g, "_")
     .slice(0, 80);
-  return `${nameBase || "mouseplotter"}.png`;
+}
+
+function plotPngFilename() {
+  return `${sanitizedTitleBase() || "mouseplotter"}.png`;
 }
 
 async function savePlotPng() {
@@ -1738,11 +1739,7 @@ importCsvInput.addEventListener("change", async () => {
 exportCsvBtn.addEventListener("click", async () => {
   if (isRecording) stopRecording();
   const csv = serializeCsv();
-  const defaultNameBase = (plotTitle || "")
-    .trim()
-    .replace(/[\/\\?%*:|"<>]/g, "")
-    .replace(/\s+/g, "_")
-    .slice(0, 80);
+  const defaultNameBase = sanitizedTitleBase();
   const suggestedName = defaultNameBase
     ? `${defaultNameBase}.csv`
     : DEFAULT_CSV_FILENAME;
