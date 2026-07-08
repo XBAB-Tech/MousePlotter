@@ -133,6 +133,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 10px 16px;
+  position: relative; /* anchor for the untested-browser overlay */
 }
 .panel--record .record-row {
   display: flex;
@@ -305,6 +306,38 @@ body {
 }
 .recording::before {
   background: #fff;
+}
+/* Untested-browser notice: an absolute overlay covering the record panel, so
+   showing/hiding it never reflows the surrounding UI. */
+.record-notice {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 16px;
+  box-sizing: border-box;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  text-align: center;
+}
+/* Explicit override: .record-notice sets its own `display`, which would
+   otherwise win over the user-agent [hidden] { display: none } rule. */
+.record-notice[hidden] {
+  display: none;
+}
+.record-notice__text {
+  margin: 0;
+  max-width: 40ch;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+.record-notice__force {
+  min-width: 120px;
 }
 .stat-value {
   font-weight: 600;
@@ -660,8 +693,28 @@ select.stat-value {
 
 .app-footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
+  align-items: center;
+  gap: 0.25rem;
   margin-top: 12px;
+}
+.footer-text {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+.footer-text-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--text-dim);
+  text-underline-offset: 2px;
+}
+.footer-text-link:hover {
+  text-decoration-color: var(--text);
+}
+.footer-sep {
+  color: var(--text-dim);
+  font-size: 0.8rem;
 }
 .footer-link {
   display: inline-flex;

@@ -19,10 +19,56 @@ const exportCsvBtn = $("exportCsvBtn");
 const importCsvInput = $("importCsvInput");
 const savePngBtn = $("savePngBtn");
 const copyPngBtn = $("copyPngBtn");
+const forceTestBtn = $("forceTestBtn");
+const unsupportedNotice = $("unsupportedNotice");
+const unsupportedNoticeDetail = $("unsupportedNoticeDetail");
 const DEFAULT_CSV_FILENAME = "mouseplotter.csv";
 
 const AUTO_PERIOD_LABEL = periodSelect?.options?.[0]?.textContent || "auto";
 const rawSupported = "onpointerrawupdate" in window;
+
+// Best-effort OS/browser detection. Used both to gate recording on untested
+// combinations (see the "Browser/OS gating" section below) and to work
+// around a Firefox-specific pointer event quirk in handlePointerEvent().
+function detectOS() {
+  const ua = navigator.userAgent;
+  const platform = navigator.userAgentData?.platform || navigator.platform ||
+    "";
+  if (/win/i.test(platform) || /Windows/i.test(ua)) return "windows";
+  if (
+    /mac/i.test(platform) ||
+    (/Mac OS X/i.test(ua) && !/iPhone|iPad|iPod/i.test(ua))
+  ) {
+    return "macos";
+  }
+  if (/linux/i.test(platform) || (/Linux/i.test(ua) && !/Android/i.test(ua))) {
+    return "linux";
+  }
+  return "unknown";
+}
+
+function detectBrowser() {
+  const ua = navigator.userAgent;
+  const brands = navigator.userAgentData?.brands ?? [];
+  if (/\bFirefox\/\d/.test(ua) || /\bGecko\/\d/.test(ua)) return "firefox";
+  const chromiumBrand = brands.some((b) =>
+    /Chromium|Google Chrome|Microsoft Edge|Opera|Brave/i.test(b.brand)
+  );
+  if (
+    chromiumBrand ||
+    /\b(Chrome|Chromium|CriOS|Edg|EdgA|OPR|SamsungBrowser)\/\d/.test(ua)
+  ) {
+    return "chromium";
+  }
+  if (
+    navigator.vendor === "Apple Computer, Inc." ||
+    (/\bSafari\//.test(ua) && /\bVersion\/\d/.test(ua))
+  ) {
+    return "safari";
+  }
+  return "unknown";
+}
+
 const PLOT_FONT_FAMILY = "-apple-system, system-ui, sans-serif";
 const PLOT_TICK_FONT_SIZE = 14;
 const PLOT_AXIS_LABEL_FONT_SIZE = 14;
@@ -41,6 +87,7 @@ const THEME = {
 };
 
 let isRecording = false;
+let recordingEnabled = true; // Gated off on untested browser/OS until forced.
 let data = new Float64Array(600000); // Flat array [t, x, y, ...]
 let index = 0;
 let currentEventType = "";
@@ -298,12 +345,32 @@ function guessPeriod(mx, my, ts) {
   return Math.max(1, maxBin) / 8;
 }
 
+// Firefox has two independent pointer-event bugs that make its normal event
+// data unusable for timing:
+//  - PointerEvent.timeStamp is stuck at a bogus, non-advancing value. Verified
+//    with firefox-pointer-lock-test.html: performance.now() advances
+//    normally in the same handler while event.timeStamp (and its delta)
+//    never change, for both pointermove and pointerrawupdate.
+//  - getCoalescedEvents() sub-events additionally inherit the *parent*
+//    event's (broken) timeStamp per Mozilla bug 1457859, and their
+//    movementX/Y don't behave like real per-sample deltas either.
+// Firefox therefore skips coalescing (one sample per dispatch) and stamps
+// each sample with performance.now() instead of the unusable ev.timeStamp.
+// This is a coarse, frame-quantized substitute -- comparable to the existing
+// Chrome/macOS display-frame limitation -- not a recovery of real per-report
+// timing. Chrome and Safari are unaffected and keep using real event data.
+const isFirefox = detectBrowser() === "firefox";
+const useCoalescedEvents = !isFirefox;
+
 // Stripped down handler for maximum performance
 function handlePointerEvent(e) {
-  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  const events = useCoalescedEvents && e.getCoalescedEvents
+    ? e.getCoalescedEvents()
+    : [e];
   ensureDataCapacity(index + events.length * 3);
+  const now = isFirefox ? performance.now() : 0;
   for (const ev of events) {
-    data[index++] = ev.timeStamp;
+    data[index++] = isFirefox ? now : ev.timeStamp;
     data[index++] = ev.movementX;
     data[index++] = ev.movementY;
   }
@@ -436,7 +503,62 @@ async function importCsvFile(file) {
   renderPlot(true);
 }
 
+// ---------------------------------------------------------------------------
+// Browser/OS gating
+//
+// High-rate pointer data is only reliable on combinations we've verified:
+//  - Chromium-based browsers on Windows and Linux
+//  - Safari on macOS
+// Chrome on macOS coalesces motion into display frames, and Firefox is
+// unreliable everywhere. On any other combination the record control is hidden
+// behind a notice with a "Test anyway" escape hatch, in case an untested
+// browser works (or gets fixed before this list is updated).
+// ---------------------------------------------------------------------------
+
+function isSupportedPlatform(os, browser) {
+  if (os === "windows" || os === "linux") return browser === "chromium";
+  if (os === "macos") return browser === "safari";
+  return false;
+}
+
+function unsupportedNoticeText(os) {
+  switch (os) {
+    case "macos":
+      return "On macOS, in-browser data recording works best on Safari. " +
+        "Alternatively, use the standalone logger and import a CSV.";
+    case "windows":
+      return "On Windows, in-browser data recording works best on " +
+        "Chromium-based browsers such as Chrome or Edge. " +
+        "Alternatively, use the standalone logger and import a CSV.";
+    case "linux":
+      return "On Linux, in-browser data recording works best on " +
+        "Chromium-based browsers such as Chrome or Chromium. " +
+        "Alternatively, use the standalone logger and import a CSV.";
+    default:
+      return "In-browser data recording works best on Chromium-based " +
+        "browsers on Windows or Linux, or Safari on macOS. Alternatively, " +
+        "use the standalone logger and import a CSV.";
+  }
+}
+
+function initPlatformGate() {
+  const os = detectOS();
+  if (isSupportedPlatform(os, detectBrowser())) return;
+
+  recordingEnabled = false;
+  if (unsupportedNoticeDetail) {
+    unsupportedNoticeDetail.textContent = unsupportedNoticeText(os);
+  }
+  if (unsupportedNotice) unsupportedNotice.hidden = false;
+}
+
+function forceEnableRecording() {
+  recordingEnabled = true;
+  if (unsupportedNotice) unsupportedNotice.hidden = true;
+}
+
 async function startRecording(mode = "space") {
+  if (!recordingEnabled) return;
   index = 0;
   plotTitle = "";
   isRecording = true;
@@ -1762,6 +1884,7 @@ exportCsvBtn.addEventListener("click", async () => {
 
 savePngBtn?.addEventListener("click", savePlotPng);
 copyPngBtn?.addEventListener("click", copyPlotPng);
+forceTestBtn?.addEventListener("click", forceEnableRecording);
 
 let resizeRaf = 0;
 const plotResizeObserver = new ResizeObserver(() => {
@@ -1770,5 +1893,6 @@ const plotResizeObserver = new ResizeObserver(() => {
 });
 plotResizeObserver.observe(plotDiv);
 
+initPlatformGate();
 updateTimerResolutionUI();
 renderPlot(true);

@@ -50,6 +50,21 @@
             >
               Click & hold or Space
             </div>
+            <div
+              id="unsupportedNotice"
+              class="record-notice"
+              role="status"
+              hidden
+            >
+              <p class="record-notice__text" id="unsupportedNoticeDetail"></p>
+              <button
+                type="button"
+                class="btn record-notice__force"
+                id="forceTestBtn"
+              >
+                Test anyway
+              </button>
+            </div>
             <div class="record-row">
               <div
                 class="segmented"
@@ -206,9 +221,9 @@
                 <strong>Single swipe.</strong> Click and hold, swipe once, then
                 release. This can help test that your mouse tracks correctly at
                 high speeds, and the &Delta;t plot shows your mouse's report
-                interval. Patterns in the x and y counts can sometimes reveal
-                artifacts related to sensor framerate, smoothing, and similar
-                processing.
+                interval. Patterns in the x and y counts can sometimes be
+                related to sensor framerate, smoothing, or other aspects of the
+                motion data pipeline.
               </li>
               <li>
                 <strong>Continuous reports.</strong> First, set your mouse to a
@@ -220,18 +235,19 @@
               </li>
               <li>
                 <strong>DPI measurement.</strong> Place a ruler or a piece of
-                paper with a known horizontal length on your mousepad. Align a
-                visible point on the mouse with the start mark. Press Space,
-                move horizontally without changing the mouse angle, then press
-                Space again. Divide Total X by the number of inches traveled.
+                paper with a known length on your mousepad, oriented
+                horizontally. Align a point on the mouse with the start mark.
+                Press Space, move horizontally without rotating the mouse,
+                then press Space again. DPI equals Total X divided by the
+                number of inches traveled. Minimize parallax by keeping your
+                eyes directly above the mouse.
               </li>
             </ol>
             <p>
               <strong>Plot navigation.</strong> Double-click to reset.
-              Middle-click and drag inside the plot to pan both directions, or
-              on an axis to pan only that direction. Drag a box or scroll over
-              the plot to zoom. Scroll over an axis to zoom only that
-              direction.
+              Middle-click and drag inside the plot to pan, or on an axis to
+              pan only one direction. Drag a box or scroll over the plot to
+              zoom. Scroll over an axis to zoom only that direction.
             </p>
           </div>
         </details>
@@ -250,22 +266,30 @@
               </div>
             </figure>
             <p>
-              Mouse firmware cannot directly affect the timing of USB reports:
-              that timing is dictated entirely by the USB host controller. Host
-              controllers tend to behave very regularly, with negligible
-              jitter, as long as there is not too much bus activity. Jitter
-              that is not quantized to multiples of 125&micro;s, as in the
-              image above, is therefore typically caused entirely by operating
-              system and CPU behavior.
+              To reduce jitter, many people report that disabling CPU C-states
+              helps. Operating system tweaks may help as well, such as forcing
+              maximum CPU clock speeds. The browser itself can also be a
+              limiting factor, and standalone applications deliver the best
+              results.
             </p>
             <p>
-              What mouse firmware can do is decide whether or not to respond to
-              a poll. Ideally, under sufficient motion, firmware responds to
-              every poll. Seeing this clearly requires the fuzz described above
-              to have an amplitude smaller than 125&micro;s. Many people report
-              that disabling CPU C-states helps. Operating system tweaks may
-              help as well, and the browser itself can also be a limiting
-              factor.
+              Keep in mind mouse firmware cannot directly affect the timing of
+              USB reports: that timing is dictated entirely by the USB host
+              controller. Host controllers tend to behave very regularly, with
+              negligible jitter, as long as bus activity is minimal.
+              Therefore, jitter (except for dropped/skipped reports, which
+              show up as jumps of 125&micro;s for 8kHz mice) is caused
+              entirely by operating system and CPU behavior.
+            </p>
+            <p>
+              If the CPU, operating system, and logging application are optimized sufficiently that
+              timing jitter remains consistently less than about 20&micro;s,
+              &Delta;t plots can be used to detect mouse firmware glitches and
+              dropped reports.
+            </p>
+            <p>
+              Ideally, under sufficient motion, firmware responds to every
+              poll with a report.
             </p>
             <p>Here is an example of a mouse with perfectly behaving firmware:</p>
             <figure class="info-figure">
@@ -296,7 +320,7 @@
                 target="_blank"
                 rel="noopener"
               >GitHub repository</a>
-              includes minimal logging utilities for both Linux and Windows.
+              includes minimal and optimized logging utilities for both Linux and Windows.
               Follow the instructions there, save a CSV, and import it into
               MousePlotter for an interactive plot.
             </p>
@@ -304,11 +328,36 @@
               You can also use MouseTester itself: MousePlotter is fully
               compatible with MouseTester CSVs, and vice versa.
             </p>
+            <p>
+              Many find that MouseTester works well in Windows PE. See
+              <a
+                href="https://github.com/BoringBoredom/WinPE"
+                target="_blank"
+                rel="noopener"
+              >BoringBoredom/WinPE</a>
+              for instructions.
+            </p>
           </div>
         </details>
       </section>
 
       <footer class="app-footer">
+        <span class="footer-text"
+          >Made by
+          <a class="footer-text-link" href="https://xbabtech.com" target="_blank" rel="noopener"
+            >XBAB Tech</a
+          >. Questions or feedback?</span
+        >
+        <a
+          class="footer-link"
+          href="https://xbabtech.com/discord"
+          target="_blank"
+          rel="noopener"
+        >
+          <img class="footer-link-icon" src="discord.svg" alt="" width="16" height="16" />
+          Join our Discord
+        </a>
+        <span class="footer-sep" aria-hidden="true">&middot;</span>
         <a
           class="footer-link"
           href="https://github.com/XBAB-Tech/MousePlotter"
@@ -316,7 +365,7 @@
           rel="noopener"
         >
           <img class="footer-link-icon" src="github.svg" alt="" width="16" height="16" />
-          View source on GitHub
+          View on GitHub
         </a>
       </footer>
     </div>
