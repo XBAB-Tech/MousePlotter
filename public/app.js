@@ -17,21 +17,21 @@ const timerResolutionIndicator = $("timerResolutionIndicator");
 const importCsvBtn = $("importCsvBtn");
 const exportCsvBtn = $("exportCsvBtn");
 const importCsvInput = $("importCsvInput");
+const savePngBtn = $("savePngBtn");
+const copyPngBtn = $("copyPngBtn");
 const DEFAULT_CSV_FILENAME = "mouseplotter.csv";
 
 const AUTO_PERIOD_LABEL = periodSelect?.options?.[0]?.textContent || "auto";
 const rawSupported = "onpointerrawupdate" in window;
-const VEL_AXIS_ANCHOR = {
-  type: "scatter",
-  yaxis: "y2",
-  hoverinfo: "skip",
-  showlegend: false,
-};
-const PLOT_BASE_FONT_SIZE = 14;
-const PLOT_AXIS_FONT_SIZE = 16;
-const PLOT_TITLE_FONT_SIZE = 16;
 const PLOT_FONT_FAMILY = "-apple-system, system-ui, sans-serif";
-const DEFAULT_PNG_EXPORT_SIZE = { width: 960, height: 720 };
+const PLOT_TICK_FONT_SIZE = 14;
+const PLOT_AXIS_LABEL_FONT_SIZE = 14;
+const PLOT_LEGEND_FONT_SIZE = 14;
+const PLOT_INFO_FONT_SIZE = 14;
+const PLOT_TITLE_FONT_SIZE = 17;
+const PLOT_TICK_FONT = `${PLOT_TICK_FONT_SIZE}px ${PLOT_FONT_FAMILY}`;
+const PLOT_AXIS_LABEL_FONT =
+  `${PLOT_AXIS_LABEL_FONT_SIZE}px ${PLOT_FONT_FAMILY}`;
 
 const rootStyle = getComputedStyle(document.documentElement);
 const THEME = {
@@ -40,56 +40,16 @@ const THEME = {
   border: rootStyle.getPropertyValue("--border").trim() || "rgba(0,0,0,0.15)",
 };
 
-function plotLayoutBase(titleText) {
-  const layout = {
-    font: {
-      family: PLOT_FONT_FAMILY,
-      size: PLOT_BASE_FONT_SIZE,
-      color: THEME.text,
-    },
-    paper_bgcolor: THEME.card,
-    plot_bgcolor: THEME.card,
-    margin: {
-      l: 56,
-      r: 56,
-      b: 54,
-      t: 34,
-      pad: 0,
-    },
-  };
-  if (titleText) {
-    layout.title = {
-      text: titleText,
-      font: { size: PLOT_TITLE_FONT_SIZE },
-      x: 0.5,
-      xanchor: "center",
-      y: 0.98,
-      yanchor: "top",
-      pad: { t: 0, b: 0, l: 0, r: 0 },
-    };
-  }
-  return layout;
-}
-
 let isRecording = false;
 let data = new Float64Array(600000); // Flat array [t, x, y, ...]
 let index = 0;
 let currentEventType = "";
 const idleText = (statusIndicator?.textContent || "").trim() ||
   "Click & hold or Space";
-let lastCountsToVelocity = NaN;
-let isSyncingAxes = false;
+let isSyncingX = false;
 let recordingMode = ""; // 'space' or 'mouse'
 let plotTitle = "";
-
-function safeNewPlot(div, traces, layout, config) {
-  if (!window.Plotly) {
-    div.textContent =
-      "Plotly failed to load (may be blocked by COEP/CORS). Try self-hosting Plotly or ensure the CDN supports CORS.";
-    return null;
-  }
-  return Plotly.newPlot(div, traces, layout, config);
-}
+let countsToVelocityScale = NaN;
 
 function ensureDataCapacity(requiredLength) {
   if (requiredLength <= data.length) return;
@@ -156,14 +116,6 @@ function replaceTriplesFromArrays({ ts, mx, my }) {
     data[index++] = mx[i];
     data[index++] = my[i];
   }
-}
-
-function relayout(updates) {
-  if (!window.Plotly) return;
-  isSyncingAxes = true;
-  Plotly.relayout(plotDiv, updates).finally(() => {
-    isSyncingAxes = false;
-  });
 }
 
 // Best-effort estimate of effective timer resolution (ms) by sampling performance.now().
@@ -534,12 +486,829 @@ function stopRecording() {
   renderPlot();
 }
 
+// ---------------------------------------------------------------------------
+// Plotting (uPlot)
+//
+// Two stacked uPlot instances share the x (time) scale:
+//  - top:    raw x/y counts as markers (left axis) + smoothed velocity lines
+//            (right axis; the "vel" scale is the "y" scale times a fixed
+//            counts->velocity factor, so both axes always show the same zoom)
+//  - bottom: raw Δt markers + smoothed Δt line
+// Raw samples and the smoothed resample grid have different time bases, so
+// each chart's series are aligned onto a union x-array with uPlot.join().
+// ---------------------------------------------------------------------------
+
+const COLOR_X = "#0072B2";
+const COLOR_X_SMOOTH = "#005686";
+const COLOR_Y = "#D55E00";
+const COLOR_Y_SMOOTH = "#A04700";
+const COLOR_DT = "#009E73";
+const COLOR_DT_SMOOTH = "#004F3A";
+const SMOOTH_LINE_WIDTH = 2;
+const PLOT_PX_ALIGN = 0;
+
+// Fraction of the (title/legend-free) plot height used by the counts chart.
+// Slightly favors the Δt panel to offset its x-axis labels and match Plotly.
+const TOP_CHART_FRACTION = 0.62;
+// Total width of each y axis. The bottom chart reserves the same width as
+// right padding so both charts' plot areas stay horizontally aligned.
+const Y_AXIS_SIZE = 44;
+const Y_AXIS_LABEL_SIZE = 32;
+const Y_AXIS_LABEL_GAP = 4;
+const RIGHT_AXIS_WIDTH = Y_AXIS_SIZE + Y_AXIS_LABEL_SIZE;
+// Tighten the bottom axis title toward the plot without clipping larger text.
+const X_AXIS_SIZE = 40;
+const X_AXIS_LABEL_SIZE = 20;
+const X_AXIS_LABEL_GAP = -8;
+const BOTTOM_CHART_TOP_PADDING = 10;
+
+const plotHeaderEl = document.createElement("div");
+plotHeaderEl.className = "plot-header";
+const plotTitleEl = document.createElement("div");
+plotTitleEl.className = "plot-title";
+plotTitleEl.style.display = "none";
+plotHeaderEl.append(plotTitleEl);
+// Keep plot action buttons out of the chart area (they would cover the
+// velocity axis) by hosting them in the header row next to the title.
+const plotActionsEl = document.createElement("div");
+plotActionsEl.className = "plot-actions";
+if (savePngBtn) plotActionsEl.append(savePngBtn);
+if (copyPngBtn) plotActionsEl.append(copyPngBtn);
+if (plotActionsEl.childElementCount > 0) plotHeaderEl.append(plotActionsEl);
+const topChartEl = document.createElement("div");
+topChartEl.className = "plot-chart plot-chart--top";
+const sharedLegendEl = document.createElement("div");
+sharedLegendEl.className = "plot-legend";
+const botChartEl = document.createElement("div");
+botChartEl.className = "plot-chart plot-chart--bottom";
+plotDiv.append(plotHeaderEl, topChartEl, sharedLegendEl, botChartEl);
+plotDiv.addEventListener("contextmenu", (e) => {
+  if (!(e.target instanceof Element) || !e.target.closest("button")) {
+    e.preventDefault();
+  }
+});
+
+let topChart = null;
+let botChart = null;
+// Default ("home") ranges for every scale; restored on double-click.
+let homeRanges = null;
+// Δt axis ticks: multiples of the period at the home range, auto when zoomed.
+let dtTicks = { linear: true, periodMs: 1 };
+let plotInfoText = "";
+let isSyncingTopY = false;
+let syncTopYRaf = 0;
+
+function destroyCharts() {
+  cancelAnimationFrame(syncTopYRaf);
+  syncTopYRaf = 0;
+  topChart?.destroy();
+  botChart?.destroy();
+  topChart = null;
+  botChart = null;
+}
+
+function hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+const roundFloat = (v) =>
+  Math.abs(v) < 1e-12 ? 0 : parseFloat(v.toPrecision(12));
+
+const fmtOrDash = (fmt) => (u, v) => (v == null ? "--" : fmt(v));
+const fmtCount = fmtOrDash((v) =>
+  Number.isInteger(v) ? String(v) : v.toFixed(2)
+);
+const fmtVel = fmtOrDash((v) => v.toFixed(3));
+const fmtMs = fmtOrDash((v) => v.toFixed(3));
+const fmtTick = (v) => String(roundFloat(v));
+
+// Lossless decimation for marker-only series: keep at most one point per
+// ~1px canvas cell. All markers of a series are filled as a single path, so
+// duplicates at the same pixel don't change the rendered output — but they
+// make full-range redraws of 100k+ events many times slower.
+const DECIMATE_MIN_POINTS = 20000;
+
+function decimatedPointsFilter(u, seriesIdx, show, gaps) {
+  if (!show) return null;
+  const s = u.series[seriesIdx];
+  const xs = u.data[0];
+  const ys = u.data[seriesIdx];
+  const i0 = s.idxs?.[0] ?? 0;
+  const i1 = s.idxs?.[1] ?? ys.length - 1;
+  if (i1 - i0 < DECIMATE_MIN_POINTS) return null;
+
+  const scX = u.scales.x;
+  const scY = u.scales[s.scale];
+  const { width, height } = u.bbox;
+  const kx = width / (scX.max - scX.min);
+  const ky = height / (scY.max - scY.min);
+  if (!Number.isFinite(kx) || !Number.isFinite(ky)) return null;
+
+  const margin = 8; // device px; keep points whose marker may touch the plot
+  const seen = new Set();
+  const out = [];
+  for (let i = i0; i <= i1; i++) {
+    const yv = ys[i];
+    if (yv == null) continue;
+    const px = Math.round((xs[i] - scX.min) * kx);
+    const py = Math.round((scY.max - yv) * ky);
+    if (py < -margin || py > height + margin) continue;
+    const key = px * 65536 + py;
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(i);
+    }
+  }
+  return out;
+}
+
+function markerSeries(label, color, scale, value) {
+  return {
+    label,
+    scale,
+    stroke: color,
+    paths: () => null,
+    points: {
+      show: true,
+      size: 4,
+      width: 0,
+      fill: hexToRgba(color, 0.5),
+      filter: decimatedPointsFilter,
+    },
+    value,
+    mpKind: "marker",
+    mpColor: color,
+  };
+}
+
+function lineSeries(label, color, scale, value) {
+  return {
+    label,
+    scale,
+    stroke: color,
+    width: SMOOTH_LINE_WIDTH,
+    spanGaps: true,
+    points: { show: false, size: 0, width: 0 },
+    value,
+    mpKind: "line",
+    mpColor: color,
+  };
+}
+
+function getPlotLegendEntries() {
+  const entries = [];
+  for (const chart of [topChart, botChart]) {
+    if (!chart) continue;
+    chart.series.forEach((sr, seriesIdx) => {
+      if (seriesIdx === 0) return;
+      entries.push({
+        chart,
+        seriesIdx,
+        label: sr.label,
+        color: sr.mpColor || sr.stroke || "#000000",
+        kind: sr.mpKind || "line",
+        show: sr.show !== false,
+      });
+    });
+  }
+  return entries;
+}
+
+function updateLegendButtonState(btn, show) {
+  btn.classList.toggle("is-off", !show);
+  btn.setAttribute("aria-pressed", show ? "true" : "false");
+}
+
+function renderSharedLegend() {
+  sharedLegendEl.replaceChildren();
+  for (const entry of getPlotLegendEntries()) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "plot-legend__item";
+    btn.title = `Toggle ${entry.label}`;
+    updateLegendButtonState(btn, entry.show);
+
+    const swatch = document.createElement("span");
+    swatch.className = `plot-legend__swatch plot-legend__swatch--${entry.kind}`;
+    swatch.style.setProperty("--series-color", entry.color);
+
+    const label = document.createElement("span");
+    label.className = "plot-legend__label";
+    label.textContent = entry.label;
+
+    btn.append(swatch, label);
+    btn.addEventListener("click", () => {
+      const show = entry.chart.series[entry.seriesIdx].show === false;
+      entry.chart.setSeries(entry.seriesIdx, { show });
+      updateLegendButtonState(btn, show);
+    });
+    sharedLegendEl.append(btn);
+  }
+}
+
+// When raw and smoothed series are joined onto a union x-array, each series
+// has data only at "its" x positions. Snap the cursor to the nearest non-null
+// sample per series so hover values don't flicker between series.
+function nearestNonNullIdx(u, seriesIdx, hoveredIdx) {
+  const ys = u.data[seriesIdx];
+  if (ys == null || ys.length === 0 || ys[hoveredIdx] != null) {
+    return hoveredIdx;
+  }
+  for (let d = 1; d <= 10000; d++) {
+    const lo = hoveredIdx - d;
+    const hi = hoveredIdx + d;
+    if (lo >= 0 && ys[lo] != null) return lo;
+    if (hi < ys.length && ys[hi] != null) return hi;
+    if (lo < 0 && hi >= ys.length) break;
+  }
+  return hoveredIdx;
+}
+
+function bindMouseDownForZoom(u, target, handler) {
+  return (e) => {
+    if (e.button !== 0 || e.shiftKey || e.target !== target) return;
+    handler(e);
+  };
+}
+
+function cursorOpts() {
+  return {
+    drag: { x: true, y: true },
+    dataIdx: nearestNonNullIdx,
+    bind: {
+      mousedown: bindMouseDownForZoom,
+      // Replace uPlot's zoom-out with a reset to the default ranges,
+      // like Plotly's double-click "home".
+      dblclick: () => () => {
+        applyHomeRanges();
+      },
+    },
+  };
+}
+
+// Mirror x-range changes (zoom/reset) onto the other chart.
+function syncXScale(src) {
+  if (isSyncingX) return;
+  const dst = src === topChart ? botChart : topChart;
+  if (!dst) return;
+  const { min, max } = src.scales.x;
+  if (min == null || max == null) return;
+  const cur = dst.scales.x;
+  if (cur.min === min && cur.max === max) return;
+  isSyncingX = true;
+  try {
+    dst.setScale("x", { min, max });
+  } finally {
+    isSyncingX = false;
+  }
+}
+
+function scalesMatch(a, b) {
+  const span = Math.max(
+    Math.abs(a.min),
+    Math.abs(a.max),
+    Math.abs(b.min),
+    Math.abs(b.max),
+    1,
+  );
+  const eps = span * 1e-12;
+  return Math.abs(a.min - b.min) <= eps && Math.abs(a.max - b.max) <= eps;
+}
+
+function syncTopYScale(changedKey) {
+  if (
+    isSyncingTopY ||
+    !topChart ||
+    !Number.isFinite(countsToVelocityScale) ||
+    countsToVelocityScale === 0
+  ) return;
+
+  const source = topChart.scales[changedKey];
+  if (source?.min == null || source?.max == null) return;
+
+  const targetKey = changedKey === "y" ? "vel" : "y";
+  const next = changedKey === "y"
+    ? {
+      min: source.min * countsToVelocityScale,
+      max: source.max * countsToVelocityScale,
+    }
+    : {
+      min: source.min / countsToVelocityScale,
+      max: source.max / countsToVelocityScale,
+    };
+  const target = topChart.scales[targetKey];
+  if (target?.min != null && target?.max != null && scalesMatch(target, next)) {
+    return;
+  }
+
+  isSyncingTopY = true;
+  try {
+    topChart.setScale(targetKey, next);
+  } finally {
+    isSyncingTopY = false;
+  }
+}
+
+function queueTopYScaleSync(changedKey) {
+  cancelAnimationFrame(syncTopYRaf);
+  syncTopYRaf = requestAnimationFrame(() => {
+    syncTopYRaf = 0;
+    syncTopYScale(changedKey);
+  });
+}
+
+function updateDtTickMode(u) {
+  if (!homeRanges) return;
+  const { min, max } = u.scales.dt;
+  if (min == null || max == null) return;
+  const [hMin, hMax] = homeRanges.dt;
+  const eps = Math.max(1e-9, (hMax - hMin) * 1e-6);
+  dtTicks.linear = Math.abs(min - hMin) < eps && Math.abs(max - hMax) < eps;
+}
+
+function applyHomeRanges() {
+  if (!topChart || !botChart || !homeRanges) return;
+  dtTicks.linear = true;
+  isSyncingX = true;
+  try {
+    topChart.setScale("x", { min: homeRanges.x[0], max: homeRanges.x[1] });
+    botChart.setScale("x", { min: homeRanges.x[0], max: homeRanges.x[1] });
+    topChart.setScale("y", { min: homeRanges.y[0], max: homeRanges.y[1] });
+    topChart.setScale("vel", {
+      min: homeRanges.vel[0],
+      max: homeRanges.vel[1],
+    });
+    botChart.setScale("dt", { min: homeRanges.dt[0], max: homeRanges.dt[1] });
+  } finally {
+    isSyncingX = false;
+  }
+}
+
+// uPlot's global pxAlign is disabled for smoother traces, so black axis lines
+// are drawn by hooks below where we can align them to the device-pixel grid.
+const AXIS_BORDER = { show: false };
+const AXIS_TEXT = {
+  font: PLOT_TICK_FONT,
+  labelFont: PLOT_AXIS_LABEL_FONT,
+};
+const Y_AXIS_OPTS = {
+  ...AXIS_TEXT,
+  size: Y_AXIS_SIZE,
+  labelSize: Y_AXIS_LABEL_SIZE,
+  labelGap: Y_AXIS_LABEL_GAP,
+};
+const X_AXIS_OPTS = {
+  ...AXIS_TEXT,
+  size: X_AXIS_SIZE,
+  labelSize: X_AXIS_LABEL_SIZE,
+  labelGap: X_AXIS_LABEL_GAP,
+};
+
+function crispStrokePos(pos, lineWidth) {
+  return Math.round(pos) + (lineWidth % 2 === 1 ? 0.5 : 0);
+}
+
+function axisLineWidth() {
+  return Math.max(1, Math.round(window.devicePixelRatio || 1));
+}
+
+// Solid black line at value 0, like Plotly's zeroline (counts = 0, Δt = 0).
+function makeZeroLineHook(scaleKey) {
+  return (u) => {
+    const sc = u.scales[scaleKey];
+    if (sc.min == null || sc.min > 0 || sc.max < 0) return;
+    const lw = axisLineWidth();
+    const y = crispStrokePos(u.valToPos(0, scaleKey, true), lw);
+    const { ctx } = u;
+    ctx.save();
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    ctx.moveTo(u.bbox.left, y);
+    ctx.lineTo(u.bbox.left + u.bbox.width, y);
+    ctx.stroke();
+    ctx.restore();
+  };
+}
+
+function makeAxisLineHook({ left = false, right = false, bottom = false }) {
+  return (u) => {
+    const lw = axisLineWidth();
+    const x0 = crispStrokePos(u.bbox.left, lw);
+    const x1 = crispStrokePos(u.bbox.left + u.bbox.width, lw);
+    const y0 = crispStrokePos(u.bbox.top, lw);
+    const y1 = crispStrokePos(u.bbox.top + u.bbox.height, lw);
+    const { ctx } = u;
+    ctx.save();
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = lw;
+    ctx.beginPath();
+    if (left) {
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x0, y1);
+    }
+    if (right) {
+      ctx.moveTo(x1, y0);
+      ctx.lineTo(x1, y1);
+    }
+    if (bottom) {
+      ctx.moveTo(x0, y1);
+      ctx.lineTo(x1, y1);
+    }
+    ctx.stroke();
+    ctx.restore();
+  };
+}
+
+// Idiomatic uPlot navigation (per the official zoom-wheel demo): the wheel
+// zooms around the cursor, and middle-drag or Shift+drag pans. Plain left
+// drag stays box-zoom, double-click stays reset-to-home.
+const WHEEL_ZOOM_FACTOR = 0.75;
+
+function wheelZoomFactor(e) {
+  return e.deltaY < 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR;
+}
+
+function zoomScaleAt(u, scaleKey, anchorVal, factor) {
+  const sc = u.scales[scaleKey];
+  if (sc?.min == null || sc?.max == null) return;
+  const span = sc.max - sc.min;
+  if (!(span > 0) || !Number.isFinite(anchorVal)) return;
+  const pct = (anchorVal - sc.min) / span;
+  const nextSpan = span * factor;
+  u.setScale(scaleKey, {
+    min: anchorVal - pct * nextSpan,
+    max: anchorVal + (1 - pct) * nextSpan,
+  });
+}
+
+function cssBbox(u) {
+  const canvas = u.ctx.canvas;
+  const rect = canvas.getBoundingClientRect();
+  const sx = rect.width / canvas.width;
+  const sy = rect.height / canvas.height;
+  return {
+    rect,
+    left: u.bbox.left * sx,
+    top: u.bbox.top * sy,
+    width: u.bbox.width * sx,
+    height: u.bbox.height * sy,
+  };
+}
+
+function axisHit(u, { leftYScale, rightYScale = null } = {}, e) {
+  const bb = cssBbox(u);
+  const x = e.clientX - bb.rect.left;
+  const y = e.clientY - bb.rect.top;
+  const plotLeft = bb.left;
+  const plotRight = bb.left + bb.width;
+  const plotTop = bb.top;
+  const plotBottom = bb.top + bb.height;
+  const overPlot = x >= plotLeft && x <= plotRight &&
+    y >= plotTop && y <= plotBottom;
+  if (overPlot) return null;
+
+  if (
+    x >= plotLeft && x <= plotRight &&
+    y > plotBottom && y <= bb.rect.height
+  ) {
+    return {
+      axis: "x",
+      scaleKey: "x",
+      pos: x - plotLeft,
+      spanPx: bb.width,
+    };
+  }
+  if (
+    leftYScale &&
+    x >= 0 && x < plotLeft &&
+    y >= plotTop && y <= plotBottom
+  ) {
+    return {
+      axis: "y",
+      scaleKey: leftYScale,
+      pos: y - plotTop,
+      spanPx: bb.height,
+    };
+  }
+  if (
+    rightYScale &&
+    x > plotRight && x <= bb.rect.width &&
+    y >= plotTop && y <= plotBottom
+  ) {
+    return {
+      axis: "y",
+      scaleKey: rightYScale,
+      pos: y - plotTop,
+      spanPx: bb.height,
+    };
+  }
+  return null;
+}
+
+function bindWheelPanZoom(u, yScaleKeys) {
+  const over = u.over;
+
+  over.addEventListener(
+    "wheel",
+    (e) => {
+      // Leave ctrl+wheel (browser zoom / trackpad pinch) to the browser.
+      if (e.ctrlKey || e.deltaY === 0 || u.scales.x.min == null) return;
+      e.preventDefault();
+      const rect = over.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const factor = wheelZoomFactor(e);
+      u.batch(() => {
+        const xVal = u.posToVal(e.clientX - rect.left, "x");
+        zoomScaleAt(u, "x", xVal, factor);
+        for (const key of yScaleKeys) {
+          if (u.scales[key]?.min == null) continue;
+          const yVal = u.posToVal(e.clientY - rect.top, key);
+          zoomScaleAt(u, key, yVal, factor);
+        }
+      });
+    },
+    { passive: false },
+  );
+
+  over.addEventListener("auxclick", (e) => {
+    if (e.button === 1) e.preventDefault();
+  });
+
+  over.addEventListener("mousedown", (e) => {
+    const isPanGesture = e.button === 1 || (e.button === 0 && e.shiftKey);
+    if (!isPanGesture || u.scales.x.min == null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = over.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const x0 = { min: u.scales.x.min, max: u.scales.x.max };
+    const xPerPx = (x0.max - x0.min) / rect.width;
+    const y0 = yScaleKeys
+      .filter((key) => u.scales[key].min != null)
+      .map((key) => ({
+        key,
+        min: u.scales[key].min,
+        max: u.scales[key].max,
+        perPx: (u.scales[key].max - u.scales[key].min) / rect.height,
+      }));
+    over.classList.add("is-panning");
+    const onMove = (ev) => {
+      ev.preventDefault();
+      const dx = (ev.clientX - startX) * xPerPx;
+      u.batch(() => {
+        u.setScale("x", { min: x0.min - dx, max: x0.max - dx });
+        for (const s of y0) {
+          const dy = (ev.clientY - startY) * s.perPx;
+          u.setScale(s.key, { min: s.min + dy, max: s.max + dy });
+        }
+      });
+    };
+    const onUp = () => {
+      over.classList.remove("is-panning");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove, { passive: false });
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+function bindAxisWheelZoom(u, { leftYScale, rightYScale = null } = {}) {
+  const axisOpts = { leftYScale, rightYScale };
+
+  u.root.addEventListener(
+    "wheel",
+    (e) => {
+      if (e.ctrlKey || e.deltaY === 0 || u.scales.x.min == null) return;
+
+      const hit = axisHit(u, axisOpts, e);
+      if (!hit) return;
+
+      e.preventDefault();
+      const factor = wheelZoomFactor(e);
+      const anchorVal = u.posToVal(hit.pos, hit.scaleKey);
+      zoomScaleAt(u, hit.scaleKey, anchorVal, factor);
+    },
+    { passive: false },
+  );
+
+  u.root.addEventListener("auxclick", (e) => {
+    if (e.button === 1 && axisHit(u, axisOpts, e)) e.preventDefault();
+  });
+
+  u.root.addEventListener("mousedown", (e) => {
+    if (e.button !== 1 || u.scales.x.min == null) return;
+    const hit = axisHit(u, axisOpts, e);
+    if (!hit) return;
+    const sc = u.scales[hit.scaleKey];
+    if (sc?.min == null || sc?.max == null || hit.spanPx <= 0) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    const startPx = hit.axis === "x" ? e.clientX : e.clientY;
+    const startRange = { min: sc.min, max: sc.max };
+    const unitsPerPx = (startRange.max - startRange.min) / hit.spanPx;
+    u.root.classList.add("is-panning");
+
+    const onMove = (ev) => {
+      ev.preventDefault();
+      const curPx = hit.axis === "x" ? ev.clientX : ev.clientY;
+      const delta = (curPx - startPx) * unitsPerPx;
+      const signedDelta = hit.axis === "x" ? -delta : delta;
+      u.setScale(hit.scaleKey, {
+        min: startRange.min + signedDelta,
+        max: startRange.max + signedDelta,
+      });
+    };
+    const onUp = () => {
+      u.root.classList.remove("is-panning");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove, { passive: false });
+    document.addEventListener("mouseup", onUp);
+  });
+}
+
+function niceTicks(min, max, targetCount) {
+  const span = max - min;
+  if (!(span > 0)) return [min];
+  const rawStep = span / targetCount;
+  const mag = 10 ** Math.floor(Math.log10(rawStep));
+  const norm = rawStep / mag;
+  const step = (norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10) * mag;
+  const out = [];
+  for (
+    let i = Math.ceil(min / step - 1e-9);
+    i * step <= max + step * 1e-9;
+    i++
+  ) {
+    out.push(roundFloat(i * step));
+  }
+  return out;
+}
+
+// Δt axis: ticks at multiples of the report period while at the home range
+// (like Plotly's tick0=0, dtick=period), auto "nice" ticks once zoomed.
+function dtSplits(u, axisIdx, min, max) {
+  const p = dtTicks.periodMs;
+  if (dtTicks.linear && p > 0 && (max - min) / p <= 24) {
+    const out = [];
+    for (let i = Math.ceil(min / p - 1e-9); i * p <= max + p * 1e-9; i++) {
+      out.push(roundFloat(i * p));
+    }
+    if (out.length > 1) return out;
+  }
+  return niceTicks(min, max, 7);
+}
+
+function chartSizes() {
+  const width = Math.max(280, plotDiv.clientWidth);
+  const height = Math.max(320, plotDiv.clientHeight);
+  const headerH = plotHeaderEl.offsetHeight || 30;
+  const legendH = sharedLegendEl.offsetHeight || 38;
+  const avail = Math.max(
+    340,
+    height - headerH - legendH,
+  );
+  const topHeight = Math.round(avail * TOP_CHART_FRACTION);
+  return { width, topHeight, botHeight: avail - topHeight };
+}
+
+function layoutCharts() {
+  if (!topChart || !botChart) return;
+  const s = chartSizes();
+  topChart.setSize({ width: s.width, height: s.topHeight });
+  botChart.setSize({ width: s.width, height: s.botHeight });
+}
+
+// uPlot routes scale min/max through range(). Pass explicit zoom/pan ranges
+// through and only fall back to the home range when unranged (init/empty data).
+const fixedRangeScale = (rangeKey, extra = {}) => ({
+  ...extra,
+  auto: false,
+  range: (u, min, max) =>
+    min == null || max == null ? homeRanges?.[rangeKey] ?? [0, 1] : [min, max],
+});
+
+function makeTopOpts(width, height) {
+  return {
+    width,
+    height,
+    pxAlign: PLOT_PX_ALIGN,
+    legend: { show: false },
+    scales: {
+      x: fixedRangeScale("x", { time: false }),
+      y: fixedRangeScale("y"),
+      vel: fixedRangeScale("vel"),
+    },
+    series: [
+      { label: "t (ms)", value: fmtMs },
+      markerSeries("x counts", COLOR_X, "y", fmtCount),
+      markerSeries("y counts", COLOR_Y, "y", fmtCount),
+      lineSeries("x vel", COLOR_X_SMOOTH, "vel", fmtVel),
+      lineSeries("y vel", COLOR_Y_SMOOTH, "vel", fmtVel),
+    ],
+    axes: [
+      {
+        scale: "x",
+        size: 4,
+        ticks: { show: false },
+        values: (u, splits) => splits.map(() => ""),
+      },
+      { scale: "y", label: "counts", border: AXIS_BORDER, ...Y_AXIS_OPTS },
+      {
+        scale: "vel",
+        label: "velocity (m/s)",
+        side: 1,
+        grid: { show: false },
+        border: AXIS_BORDER,
+        ...Y_AXIS_OPTS,
+        values: (u, splits) => splits.map((v) => v.toFixed(2)),
+      },
+    ],
+    cursor: cursorOpts(),
+    hooks: {
+      setScale: [
+        (u, key) => {
+          if (key === "x") syncXScale(u);
+          else if (key === "y" || key === "vel") queueTopYScaleSync(key);
+        },
+      ],
+      drawAxes: [
+        makeZeroLineHook("y"),
+        makeAxisLineHook({ left: true, right: true }),
+      ],
+    },
+  };
+}
+
+function makeBotOpts(width, height) {
+  return {
+    width,
+    height,
+    pxAlign: PLOT_PX_ALIGN,
+    legend: { show: false },
+    // Right padding keeps the plot area aligned with the top chart,
+    // which has the velocity axis on its right side.
+    padding: [BOTTOM_CHART_TOP_PADDING, RIGHT_AXIS_WIDTH, 0, 0],
+    scales: {
+      x: fixedRangeScale("x", { time: false }),
+      dt: fixedRangeScale("dt"),
+    },
+    series: [
+      { label: "t (ms)", value: fmtMs },
+      markerSeries("Δt raw", COLOR_DT, "dt", fmtMs),
+      lineSeries("Δt smoothed", COLOR_DT_SMOOTH, "dt", fmtMs),
+    ],
+    axes: [
+      { scale: "x", label: "time (ms)", border: AXIS_BORDER, ...X_AXIS_OPTS },
+      {
+        scale: "dt",
+        label: "Δt (ms)",
+        splits: dtSplits,
+        border: AXIS_BORDER,
+        ...Y_AXIS_OPTS,
+        values: (u, splits) => splits.map(fmtTick),
+      },
+    ],
+    cursor: cursorOpts(),
+    hooks: {
+      setScale: [
+        (u, key) => {
+          if (key === "x") syncXScale(u);
+          else if (key === "dt") updateDtTickMode(u);
+        },
+      ],
+      drawAxes: [
+        makeZeroLineHook("dt"),
+        makeAxisLineHook({ left: true, bottom: true }),
+      ],
+    },
+  };
+}
+
+function mountAnnotation() {
+  if (!topChart || !plotInfoText) return;
+  const el = document.createElement("div");
+  el.className = "plot-info-box";
+  el.textContent = plotInfoText;
+  topChart.over.appendChild(el);
+}
+
 function renderPlot(allowEmpty = false) {
   const count = index / 3;
   if (count === 0 && !allowEmpty) return;
-
-  const axisTitleFont = { size: PLOT_AXIS_FONT_SIZE };
-  const axisTickFont = { size: PLOT_AXIS_FONT_SIZE };
+  if (!window.uPlot) {
+    plotDiv.textContent = "uPlot failed to load.";
+    return;
+  }
 
   let ts;
   let mx;
@@ -628,39 +1397,13 @@ function renderPlot(allowEmpty = false) {
   // Convert counts -> velocity (m/s), using:
   // (counts) * 1/dpi * (25.4/1000) * 1000/period
   const countsToVelocity = (1 / dpiVal) * (25.4 / 1000) * (1000 / periodMs);
-  lastCountsToVelocity = countsToVelocity;
+  countsToVelocityScale = countsToVelocity;
   const countsPerMsToVelocity = (1 / dpiVal) * (25.4 / 1000) * 1000;
 
   const span = maxCount - minCount;
   const pad = span > 0 ? span * 0.05 : 1;
   const yMin = minCount - pad;
   const yMax = maxCount + pad;
-
-  const RAW_ALPHA = 0.5;
-  const SMOOTH_ALPHA = 1.0;
-
-  const mkMarkerTrace = (name, x, y, color, extra = {}) => ({
-    x,
-    y,
-    type: "scattergl",
-    mode: "markers",
-    name,
-    opacity: RAW_ALPHA,
-    marker: { size: 3, color },
-    ...extra,
-  });
-
-  const mkLineTrace = (name, x, y, color, extra = {}) => ({
-    x,
-    y,
-    type: "scattergl",
-    mode: "lines",
-    name,
-    opacity: SMOOTH_ALPHA,
-    line: { width: 2.5, color },
-    hoverinfo: "y+name",
-    ...extra,
-  });
 
   const SMOOTH_WINDOW_MS = 12;
   const SMOOTH_DTOUT_MS = 1 / 16;
@@ -696,270 +1439,258 @@ function renderPlot(allowEmpty = false) {
     periodLabel = `${periodMs.toFixed(digits).replace(/\.?0+$/, "")}ms`;
   }
   const dpiText = `${Math.round(dpiVal)}dpi`;
-  const plotInfoText = `${dpiText}<br>${periodLabel}`;
+  plotInfoText = `${dpiText}\n${periodLabel}`;
 
-  const layout = {
-    ...plotLayoutBase(plotTitle),
-    xaxis: {
-      title: { text: "", font: axisTitleFont },
-      tickfont: axisTickFont,
-      zeroline: false,
-      showticklabels: false,
-      nticks: 12,
-      domain: [0, 1],
-      anchor: "y",
-    },
-    xaxis2: {
-      title: { text: "time (ms)", font: axisTitleFont },
-      tickfont: axisTickFont,
-      zeroline: false,
-      matches: "x",
-      showgrid: true,
-      nticks: 12,
-      domain: [0, 1],
-      anchor: "y3",
-    },
-    yaxis: {
-      title: { text: "counts", font: axisTitleFont },
-      tickfont: axisTickFont,
-      range: [yMin, yMax],
-      domain: [0.35, 1],
-      showline: true,
-    },
-    yaxis2: {
-      title: {
-        text: "velocity (m/s)",
-        font: axisTitleFont,
-      },
-      tickfont: axisTickFont,
-      automargin: true,
-      overlaying: "y",
-      side: "right",
-      range: [yMin * countsToVelocity, yMax * countsToVelocity],
-      tickformat: ".2f",
-      showgrid: false,
-      zeroline: false,
-      showline: true,
-      anchor: "x",
-    },
-    yaxis3: {
-      title: { text: "Δt (ms)", font: axisTitleFont },
-      tickfont: axisTickFont,
-      range: [0, 4 * periodMs],
-      tickmode: "linear",
-      tick0: 0,
-      dtick: periodMs,
-      domain: [0, 0.3],
-      showline: true,
-      anchor: "x2",
-    },
-    legend: {
-      x: 0.5,
-      y: 0.325,
-      xanchor: "center",
-      yanchor: "middle",
-      orientation: "h",
-      valign: "middle",
-      bgcolor: THEME.card,
-      bordercolor: THEME.border,
-      borderwidth: 1,
-    },
-    annotations: [
-      {
-        text: plotInfoText,
-        xref: "paper",
-        yref: "paper",
-        x: 0.99,
-        y: 0.99,
-        xanchor: "right",
-        yanchor: "top",
-        align: "right",
-        showarrow: false,
-        font: { size: PLOT_BASE_FONT_SIZE, color: THEME.text },
-        bgcolor: THEME.card,
-        bordercolor: THEME.border,
-        borderwidth: 1,
-        borderpad: 4,
-      },
-    ],
+  // Default ("home") ranges, matching the Plotly layout:
+  // counts padded 5%, velocity locked to counts, Δt [0, 4 * period].
+  const xHome = count > 0 ? [ts[0], ts[count - 1]] : [0, 1000];
+  if (!(xHome[1] - xHome[0] > 0)) {
+    xHome[0] -= 1;
+    xHome[1] += 1;
+  }
+  homeRanges = {
+    x: xHome,
+    y: [yMin, yMax],
+    vel: [yMin * countsToVelocity, yMax * countsToVelocity],
+    dt: [0, 4 * periodMs],
   };
+  dtTicks = { linear: true, periodMs };
 
-  const yaxis3TicksAuto = {
-    "yaxis3.tickmode": "auto",
-    "yaxis3.dtick": null,
-    "yaxis3.tick0": null,
-    "yaxis3.nticks": 7,
-  };
-  const yaxis3TicksLinear = {
-    "yaxis3.tickmode": "linear",
-    "yaxis3.tick0": 0,
-    "yaxis3.dtick": periodMs,
-    "yaxis3.nticks": null,
-  };
+  // Align raw samples and the smoothed grid onto shared x-arrays.
+  let topData;
+  let botData;
+  if (count > 0) {
+    topData = uPlot.join([
+      [ts, mx, my],
+      [tSmooth, xVelSmooth, yVelSmooth],
+    ]);
+  } else {
+    topData = [[], [], [], [], []];
+  }
+  if (dtRawT.length > 0 && dtSmoothT.length > 0) {
+    botData = uPlot.join([
+      [dtRawT, dtRaw],
+      [dtSmoothT, dtSmooth],
+    ]);
+  } else if (dtRawT.length > 0) {
+    botData = [dtRawT, dtRaw, new Array(dtRawT.length).fill(null)];
+  } else {
+    botData = [[], [], []];
+  }
 
-  const COLOR_X = "#0072B2";
-  const COLOR_X_SMOOTH = "#005686";
-  const COLOR_Y = "#D55E00";
-  const COLOR_Y_SMOOTH = "#A04700";
-  const COLOR_DT = "#009E73";
-  const COLOR_DT_SMOOTH = "#004F3A";
+  destroyCharts();
+  plotTitleEl.textContent = plotTitle;
+  plotTitleEl.style.display = plotTitle ? "" : "none";
 
-  // Draw raw markers first, then smoothed lines (on top) for readability.
-  // Dummy trace forces Plotly to render the secondary y-axis without duplicating data.
-  const traces = [
-    mkMarkerTrace("x counts", ts, mx, COLOR_X, { legendrank: 10 }),
-    mkMarkerTrace("y counts", ts, my, COLOR_Y, { legendrank: 20 }),
-    mkMarkerTrace("Δt raw", dtRawT, dtRaw, COLOR_DT, {
-      xaxis: "x2",
-      yaxis: "y3",
-      legendrank: 30,
-    }),
-    mkLineTrace("x vel", tSmooth, xVelSmooth, COLOR_X_SMOOTH, {
-      yaxis: "y2",
-      legendrank: 11,
-    }),
-    mkLineTrace("y vel", tSmooth, yVelSmooth, COLOR_Y_SMOOTH, {
-      yaxis: "y2",
-      legendrank: 21,
-    }),
-    mkLineTrace("Δt smoothed", dtSmoothT, dtSmooth, COLOR_DT_SMOOTH, {
-      xaxis: "x2",
-      yaxis: "y3",
-      legendrank: 31,
-    }),
-    { x: [], y: [], ...VEL_AXIS_ANCHOR },
-  ];
-
-  const p = safeNewPlot(plotDiv, traces, layout, {
-    responsive: true,
-    // Plotly's modebar "Download plot as a png" uses this.
-    toImageButtonOptions: {
-      format: "png",
-      width: DEFAULT_PNG_EXPORT_SIZE.width,
-      height: DEFAULT_PNG_EXPORT_SIZE.height,
-      scale: 1,
-    },
+  const sizes = chartSizes();
+  topChart = new uPlot(
+    makeTopOpts(sizes.width, sizes.topHeight),
+    topData,
+    topChartEl,
+  );
+  botChart = new uPlot(
+    makeBotOpts(sizes.width, sizes.botHeight),
+    botData,
+    botChartEl,
+  );
+  bindWheelPanZoom(topChart, ["y", "vel"]);
+  bindWheelPanZoom(botChart, ["dt"]);
+  bindAxisWheelZoom(topChart, { leftYScale: "y", rightYScale: "vel" });
+  bindAxisWheelZoom(botChart, { leftYScale: "dt" });
+  renderSharedLegend();
+  applyHomeRanges();
+  // The shared legend is measurable only after creation; fix up chart heights.
+  layoutCharts();
+  mountAnnotation();
+  // Re-measure after paint: renderPlot often runs inside an input handler
+  // (e.g. the mouseup/keydown that stops recording), where container
+  // measurements can be stale. The ResizeObserver won't catch this case
+  // because the container's size doesn't change afterwards.
+  requestAnimationFrame(() => {
+    layoutCharts();
+    requestAnimationFrame(layoutCharts);
   });
-  if (p && plotDiv?.on) {
-    p.then(() => {
-      if (plotDiv.removeAllListeners) {
-        for (
-          const evtName of [
-            "plotly_relayout",
-            "plotly_doubleclick",
-            "plotly_buttonclicked",
-          ]
-        ) {
-          plotDiv.removeAllListeners(evtName);
-        }
-      }
+}
 
-      plotDiv.on("plotly_doubleclick", () => {
-        // After Plotly applies its double-click behavior (toggle between home/autoscale),
-        // adjust yaxis3 ticks to avoid excessive gridlines.
-        setTimeout(() => {
-          if (isSyncingAxes) return;
-          const auto = !!plotDiv?.layout?.yaxis3?.autorange;
-          relayout(auto ? yaxis3TicksAuto : yaxis3TicksLinear);
-        }, 0);
-      });
+// ---------------------------------------------------------------------------
+// PNG export: compose both chart canvases (plus title, legend, and info box)
+// onto one canvas at the current on-screen resolution.
+// ---------------------------------------------------------------------------
 
-      plotDiv.on("plotly_buttonclicked", (e) => {
-        // Keep yaxis3 tick density sane when using modebar controls.
-        const btn = e?.button?.name;
-        if (btn !== "autoScale2d" && btn !== "resetScale2d") return;
-        setTimeout(() => {
-          if (isSyncingAxes) return;
-          if (btn === "autoScale2d") {
-            relayout(yaxis3TicksAuto);
-          } else if (btn === "resetScale2d") {
-            relayout(yaxis3TicksLinear);
-          }
-        }, 0);
-      });
+function drawExportLegend(ctx, width, centerY, s) {
+  const entries = getPlotLegendEntries().filter((entry) => entry.show);
+  if (entries.length === 0) return;
 
-      plotDiv.on("plotly_relayout", (ev) => {
-        if (isSyncingAxes || !ev) return;
+  ctx.font = `${PLOT_LEGEND_FONT_SIZE * s}px ${PLOT_FONT_FAMILY}`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  const swatchW = 18 * s;
+  const swatchGap = 6 * s;
+  const entryGap = 22 * s;
+  let total = -entryGap;
+  for (const en of entries) {
+    en.textW = ctx.measureText(en.label).width;
+    total += swatchW + swatchGap + en.textW + entryGap;
+  }
+  let x = Math.max(0, (width - total) / 2);
+  for (const en of entries) {
+    ctx.fillStyle = en.color;
+    if (en.kind === "marker") {
+      ctx.beginPath();
+      ctx.arc(x + swatchW / 2, centerY, 3.5 * s, 0, 2 * Math.PI);
+      ctx.fill();
+    } else {
+      ctx.fillRect(x, centerY - 1.5 * s, swatchW, 3 * s);
+    }
+    ctx.fillStyle = THEME.text;
+    ctx.fillText(en.label, x + swatchW + swatchGap, centerY);
+    x += swatchW + swatchGap + en.textW + entryGap;
+  }
+}
 
-        const yaxis3AutoRange = "yaxis3.autorange" in ev
-          ? ev["yaxis3.autorange"]
-          : undefined;
-        const yaxis3RangeChanged = "yaxis3.range" in ev ||
-          "yaxis3.range[0]" in ev ||
-          "yaxis3.range[1]" in ev;
-        const xaxisAutoRange = "xaxis.autorange" in ev
-          ? ev["xaxis.autorange"]
-          : undefined;
-        const xaxisRangeChanged = "xaxis.range" in ev ||
-          "xaxis.range[0]" in ev ||
-          "xaxis.range[1]" in ev;
+function renderPlotPngCanvas() {
+  if (!topChart || !botChart) return null;
+  const cTop = topChart.ctx.canvas;
+  const cBot = botChart.ctx.canvas;
+  const s = window.devicePixelRatio || 1;
+  const width = Math.max(cTop.width, cBot.width);
+  const titleH = Math.round((plotHeaderEl.offsetHeight || 30) * s);
+  const legendH = Math.round((sharedLegendEl.offsetHeight || 40) * s);
+  const height = titleH + cTop.height + legendH + cBot.height;
 
-        const updates = {};
-        const setScaledRange = (targetKey, a0, a1, scale) => {
-          if (!Number.isFinite(scale) || scale === 0) return;
-          if (!Number.isFinite(a0) || !Number.isFinite(a1)) return;
-          updates[targetKey] = [a0 * scale, a1 * scale];
-        };
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = THEME.card || "#ffffff";
+  ctx.fillRect(0, 0, width, height);
 
-        const isAxisTouched = (axis) =>
-          `${axis}.range` in ev ||
-          `${axis}.range[0]` in ev ||
-          `${axis}.range[1]` in ev ||
-          `${axis}.autorange` in ev;
+  if (plotTitle) {
+    ctx.fillStyle = THEME.text;
+    ctx.font = `600 ${PLOT_TITLE_FONT_SIZE * s}px ${PLOT_FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(plotTitle, width / 2, titleH / 2);
+  }
 
-        const getAxisRange = (axis) => {
-          const key = `${axis}.range`;
-          if (Array.isArray(ev[key]) && ev[key].length === 2) return ev[key];
+  ctx.drawImage(cTop, 0, titleH);
+  drawExportLegend(ctx, width, titleH + cTop.height + legendH / 2, s);
+  ctx.drawImage(cBot, 0, titleH + cTop.height + legendH);
 
-          const r0Key = `${axis}.range[0]`;
-          const r1Key = `${axis}.range[1]`;
-          const r0 = r0Key in ev
-            ? ev[r0Key]
-            : plotDiv?.layout?.[axis]?.range?.[0];
-          const r1 = r1Key in ev
-            ? ev[r1Key]
-            : plotDiv?.layout?.[axis]?.range?.[1];
-          return [r0, r1];
-        };
-
-        const yaxisChanged = isAxisTouched("yaxis");
-        const yaxis2Changed = isAxisTouched("yaxis2");
-
-        // Keep x-grid density sane (especially after autoscale to full range).
-        if (xaxisAutoRange === true || xaxisRangeChanged) {
-          updates["xaxis.nticks"] = 12;
-          updates["xaxis2.nticks"] = 12;
-        }
-
-        // If yaxis3 autoranges or is interacted with, allow auto ticks but cap density.
-        if (yaxis3AutoRange === true || yaxis3RangeChanged) {
-          Object.assign(updates, yaxis3TicksAuto);
-        }
-
-        if (yaxisChanged) {
-          const [y0, y1] = getAxisRange("yaxis");
-          setScaledRange("yaxis2.range", y0, y1, lastCountsToVelocity);
-        } else if (yaxis2Changed) {
-          const [v0, v1] = getAxisRange("yaxis2");
-          setScaledRange("yaxis.range", v0, v1, 1 / lastCountsToVelocity);
-        }
-
-        if (Object.keys(updates).length > 0) relayout(updates);
-      });
+  // dpi/period info box, top-right of the counts plot area (device px bbox),
+  // drawn as a bordered island like the live .plot-info-box overlay.
+  if (plotInfoText) {
+    const bb = topChart.bbox;
+    const lines = plotInfoText.split("\n");
+    ctx.font = `${PLOT_INFO_FONT_SIZE * s}px ${PLOT_FONT_FAMILY}`;
+    const lineH = 18 * s;
+    const padX = 7 * s;
+    const padY = 4 * s;
+    let textW = 0;
+    for (const line of lines) {
+      textW = Math.max(textW, ctx.measureText(line).width);
+    }
+    const boxW = textW + padX * 2;
+    const boxH = lines.length * lineH + padY * 2;
+    const boxX = bb.left + bb.width - boxW - 4 * s;
+    const boxY = titleH + bb.top + 4 * s;
+    ctx.fillStyle = THEME.card || "#ffffff";
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.strokeStyle = THEME.border || "#dcdcdc";
+    ctx.lineWidth = Math.max(1, Math.round(s));
+    ctx.strokeRect(boxX + 0.5, boxY + 0.5, boxW, boxH);
+    ctx.fillStyle = THEME.text;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    lines.forEach((line, i) => {
+      ctx.fillText(line, boxX + boxW - padX, boxY + padY + lineH * (i + 0.5));
     });
+  }
+
+  return canvas;
+}
+
+function plotPngBlob() {
+  const canvas = renderPlotPngCanvas();
+  if (!canvas) return Promise.reject(new Error("Plot is not ready"));
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      blob ? resolve(blob) : reject(new Error("Could not create PNG"));
+    }, "image/png");
+  });
+}
+
+function plotPngFilename() {
+  const nameBase = (plotTitle || "")
+    .trim()
+    .replace(/[\/\\?%*:|"<>]/g, "")
+    .replace(/\s+/g, "_")
+    .slice(0, 80);
+  return `${nameBase || "mouseplotter"}.png`;
+}
+
+async function savePlotPng() {
+  try {
+    const blob = await plotPngBlob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = plotPngFilename();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (err) {
+    console.warn(err);
+  }
+}
+
+function flashButtonLabel(btn, label) {
+  if (!btn) return;
+  const original = btn.dataset.originalLabel || btn.textContent;
+  btn.dataset.originalLabel = original;
+  btn.textContent = label;
+  clearTimeout(btn._labelTimer);
+  btn._labelTimer = setTimeout(() => {
+    btn.textContent = btn.dataset.originalLabel;
+  }, 1400);
+}
+
+async function copyPlotPng() {
+  if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") {
+    flashButtonLabel(copyPngBtn, "Copy failed");
+    return;
+  }
+
+  try {
+    const blobPromise = plotPngBlob();
+    await navigator.clipboard.write([
+      new ClipboardItem({ "image/png": blobPromise }),
+    ]);
+    flashButtonLabel(copyPngBtn, "Copied");
+  } catch (err) {
+    console.warn(err);
+    flashButtonLabel(copyPngBtn, "Copy failed");
   }
 }
 
 window.addEventListener("keydown", (e) => {
   if (e.code !== "Space") return;
   e.preventDefault();
+  e.stopPropagation();
   if (e.repeat) return;
-  if (isRecording && recordingMode === "space") {
+  if (isRecording) {
     stopRecording();
-  } else if (!isRecording) {
+  } else {
     startRecording("space");
   }
-});
+}, { capture: true });
+
+window.addEventListener("keyup", (e) => {
+  if (e.code !== "Space") return;
+  e.preventDefault();
+  e.stopPropagation();
+}, { capture: true });
 
 // Click-and-drag recording on the status indicator
 statusIndicator.addEventListener("mousedown", (e) => {
@@ -1031,6 +1762,16 @@ exportCsvBtn.addEventListener("click", async () => {
     alert(err?.message || "Export failed.");
   }
 });
+
+savePngBtn?.addEventListener("click", savePlotPng);
+copyPngBtn?.addEventListener("click", copyPlotPng);
+
+let resizeRaf = 0;
+const plotResizeObserver = new ResizeObserver(() => {
+  cancelAnimationFrame(resizeRaf);
+  resizeRaf = requestAnimationFrame(layoutCharts);
+});
+plotResizeObserver.observe(plotDiv);
 
 updateTimerResolutionUI();
 renderPlot(true);

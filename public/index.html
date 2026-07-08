@@ -19,11 +19,9 @@
       This cannot be done via <meta http-equiv>; it must be HTTP response headers.
     -->
 
-    <!-- COEP-friendly CORS fetch for the CDN script -->
-    <script
-      src="https://cdn.plot.ly/plotly-2.27.0.min.js"
-      crossorigin="anonymous"
-    ></script>
+    <!-- uPlot is self-hosted, so it is COEP-compatible by default. -->
+    <link rel="stylesheet" href="uPlot.min.css" />
+    <script src="uPlot.iife.min.js"></script>
 
     <link rel="stylesheet" href="styles.css" />
   </head>
@@ -169,8 +167,146 @@
       </div>
 
       <div class="plot-card">
+        <button
+          class="btn save-png-btn"
+          id="savePngBtn"
+          type="button"
+          title="Save plot as PNG"
+        >
+          Save PNG
+        </button>
+        <button
+          class="btn copy-png-btn"
+          id="copyPngBtn"
+          type="button"
+          title="Copy plot PNG to clipboard"
+        >
+          Copy PNG
+        </button>
         <div id="plot"></div>
       </div>
+
+      <section class="info-section" aria-label="About MousePlotter">
+        <details class="info-card">
+          <summary>How to use</summary>
+          <div class="info-card__body">
+            <p>
+              MousePlotter is a browser-based version of
+              <a
+                href="https://github.com/microe1/MouseTester"
+                target="_blank"
+                rel="noopener"
+              >MouseTester</a>
+              by microe1. Both tools plot mouse report data, especially raw
+              motion counts, against time.
+            </p>
+            <p>Three useful workflows:</p>
+            <ol>
+              <li>
+                <strong>Single swipe.</strong> Click and hold, swipe once, then
+                release. This can help test that your mouse tracks correctly at
+                high speeds, and the &Delta;t plot shows your mouse's report
+                interval. Patterns in the x and y counts can sometimes reveal
+                artifacts related to sensor framerate, smoothing, and similar
+                processing.
+              </li>
+              <li>
+                <strong>Continuous reports.</strong> First, set your mouse to a
+                high DPI such as 6400. Click and hold, move the mouse in
+                medium-speed circles for as long as you like, then release.
+                This shows how stably your browser receives mouse data (or,
+                when importing a CSV, how stably the logging application
+                received it).
+              </li>
+              <li>
+                <strong>DPI measurement.</strong> Place a ruler or a piece of
+                paper with a known horizontal length on your mousepad. Align a
+                visible point on the mouse with the start mark. Press Space,
+                move horizontally without changing the mouse angle, then press
+                Space again. Divide Total X by the number of inches traveled.
+              </li>
+            </ol>
+            <p>
+              <strong>Plot navigation.</strong> Double-click to reset.
+              Middle-click and drag inside the plot to pan both directions, or
+              on an axis to pan only that direction. Drag a box or scroll over
+              the plot to zoom. Scroll over an axis to zoom only that
+              direction.
+            </p>
+          </div>
+        </details>
+
+        <details class="info-card">
+          <summary>What does jitter in the &Delta;t plot mean?</summary>
+          <div class="info-card__body">
+            <p>
+              If the &Delta;t plot looks fuzzy, like the example below, the
+              most likely cause is timing jitter in the operating system's data
+              pipeline.
+            </p>
+            <figure class="info-figure">
+              <div class="info-figure__placeholder">
+                Placeholder: example of OS-level timing jitter
+              </div>
+            </figure>
+            <p>
+              Mouse firmware cannot directly affect the timing of USB reports:
+              that timing is dictated entirely by the USB host controller. Host
+              controllers tend to behave very regularly, with negligible
+              jitter, as long as there is not too much bus activity. Jitter
+              that is not quantized to multiples of 125&micro;s, as in the
+              image above, is therefore typically caused entirely by operating
+              system and CPU behavior.
+            </p>
+            <p>
+              What mouse firmware can do is decide whether or not to respond to
+              a poll. Ideally, under sufficient motion, firmware responds to
+              every poll. Seeing this clearly requires the fuzz described above
+              to have an amplitude smaller than 125&micro;s. Many people report
+              that disabling CPU C-states helps. Operating system tweaks may
+              help as well, and the browser itself can also be a limiting
+              factor.
+            </p>
+            <p>Here is an example of a mouse with perfectly behaving firmware:</p>
+            <figure class="info-figure">
+              <div class="info-figure__placeholder">
+                Placeholder: firmware that responds to every poll
+              </div>
+            </figure>
+            <p>
+              Here is an example of a mouse with firmware that skips a poll
+              every few seconds:
+            </p>
+            <figure class="info-figure">
+              <div class="info-figure__placeholder">
+                Placeholder: firmware that skips polls
+              </div>
+            </figure>
+          </div>
+        </details>
+
+        <details class="info-card">
+          <summary>Standalone logging utilities</summary>
+          <div class="info-card__body">
+            <p>
+              Browsers are ultimately not ideal for logging data with
+              microsecond-level timing precision. For this reason, the
+              <a
+                href="https://github.com/XBAB-Tech/MousePlotter"
+                target="_blank"
+                rel="noopener"
+              >GitHub repository</a>
+              includes minimal logging utilities for both Linux and Windows.
+              Follow the instructions there, save a CSV, and import it into
+              MousePlotter for an interactive plot.
+            </p>
+            <p>
+              You can also use MouseTester itself: MousePlotter is fully
+              compatible with MouseTester CSVs, and vice versa.
+            </p>
+          </div>
+        </details>
+      </section>
 
       <footer class="app-footer">
         <a
