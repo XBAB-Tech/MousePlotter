@@ -8,6 +8,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MousePlotter</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
 
     <!--
       To get timer precision beyond ~100us in Chrome, you MUST serve this page with:
@@ -30,6 +31,15 @@
     <div class="container">
       <div class="topbar">
         <div class="brand">
+          <a
+            class="brand-logo-link"
+            href="https://xbabtech.com"
+            target="_blank"
+            rel="noopener"
+            aria-label="XBAB Tech home"
+          >
+            <img class="brand-logo" src="logo.svg" alt="" width="28" height="28" />
+          </a>
           <div class="brand__title">MousePlotter</div>
         </div>
 
@@ -162,6 +172,17 @@
         <div id="plot"></div>
       </div>
 
+      <footer class="app-footer">
+        <a
+          class="footer-link"
+          href="https://github.com/XBAB-Tech/MousePlotter"
+          target="_blank"
+          rel="noopener"
+        >
+          <img class="footer-link-icon" src="github.svg" alt="" width="16" height="16" />
+          View source on GitHub
+        </a>
+      </footer>
     </div>
 
     <script src="app.js"></script>

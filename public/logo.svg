@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <rect x="0" y="0" width="100" height="50" fill="white"/>
+  <rect x="0" y="50" width="100" height="50" fill="black"/>
+  <g transform="translate(3,0)">
+  <path d="M10,5 L40,5 L10,45 L40,45 Z" fill="none" stroke="black" stroke-width="2.5" stroke-linejoin="sharp"/>
+  </g>
+  <g transform="translate(3,50)">
+    <polygon points="25,7 8,45 42,45" fill="none" stroke="white" stroke-width="2.5" stroke-linejoin="sharp"/>
+  </g>
+  <g transform="translate(47,0)">
+    <polygon points="10,4 28,4 30,46 10,46" fill="black"/>
+    <circle cx="28" cy="15" r="11" fill="black"/>
+    <circle cx="30" cy="35" r="11" fill="black"/>
+  </g>
+  <g transform="translate(47,50)">
+    <polygon points="10,4 28,4 30,46 10,46" fill="white"/>
+    <circle cx="28" cy="15" r="11" fill="white"/>
+    <circle cx="30" cy="35" r="11" fill="white"/>
+  </g>
+</svg>
