@@ -3,7 +3,7 @@ TARGET ?= x86_64-windows-gnu
 
 # Keep in sync with build.bat.
 CFLAGS = -O3 -fno-stack-protector
-LDFLAGS = -nostdlib -Wl,--subsystem,windows
+LDFLAGS = -municode -Wl,--subsystem,windows
 LIBS = -lkernel32 -luser32 -lgdi32 -lcomdlg32 -lwinmm
 
 .PHONY: all clean

@@ -16,11 +16,9 @@
 // the Linux tool's "userTime" (it includes OS scheduling jitter), not its
 // kernel "eventTime". The real-time tuning below exists to keep that jitter low.
 //
-// This uses no C runtime: the entry point is wWinMainCRTStartup and all
-// formatting / allocation / file I/O go through the Win32 API. As a result the
-// exe imports only core Windows DLLs and runs on Windows 7 through 11 with
-// nothing installed. Build with build.bat or the Makefile (three steps: compile
-// the resources, compile this, then link with -nostdlib).
+// Requires the Universal CRT: in-box on Windows 10 and 11, and available on
+// Windows 7 / 8.1 through the KB2999226 update. Build with build.bat or the
+// Makefile.
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT
@@ -38,23 +36,6 @@
 #include <stdint.h>
 
 #include "resource.h"
-
-// No CRT: LLVM still lowers aggregate initializers (and similar) into memset /
-// memcpy calls, so we must provide them. optnone stops the optimizer from
-// recognizing these loops and turning them into calls back to themselves.
-__attribute__((optnone))
-void *memset(void *dst, int c, size_t n) {
-    unsigned char *p = (unsigned char *)dst;
-    for (size_t i = 0; i < n; i++) p[i] = (unsigned char)c;
-    return dst;
-}
-__attribute__((optnone))
-void *memcpy(void *dst, const void *src, size_t n) {
-    unsigned char *p = (unsigned char *)dst;
-    const unsigned char *q = (const unsigned char *)src;
-    for (size_t i = 0; i < n; i++) p[i] = q[i];
-    return dst;
-}
 
 // Storage: linked list of fixed-size chunks (mirrors linux_cli). Overflow past
 // CHUNK_CAP is rare; we just allocate a new chunk, with no copying.
@@ -189,9 +170,9 @@ static void write_all(HANDLE h, const void *buf, int len) {
 
 // Title, DPI (hard-coded 800 like linux_cli; change it in the web UI on import),
 // the column header, then one "dx,dy,ms" row per report (ms relative to the
-// first sample). Byte-for-byte the format the web app itself exports. The time
-// is built from integer math (whole ms + 6 fractional digits), so we need no
-// floating-point printf, and thus no C runtime.
+// first sample). Byte-for-byte the format the web app itself exports. wsprintfA
+// has no floating-point support, so the time is built from integer math (whole
+// ms + 6 fractional digits).
 static void write_csv_file(HANDLE h) {
     static const char header[] =
         "MousePlotter Windows logger\r\n800\r\nxCount,yCount,Time (ms)\r\n";
@@ -482,10 +463,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// No CRT startup: this is the PE entry point. It does what the CRT normally does
-// for us (nothing we need) and then runs the app.
-void wWinMainCRTStartup(void) {
-    HINSTANCE hInst = GetModuleHandleW(NULL);
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
+    (void)hPrevInstance; (void)pCmdLine; (void)nCmdShow;
 
     // Render at true device pixels so text stays sharp on scaled displays, then
     // read the system DPI so the window and fonts are scaled up to match.
