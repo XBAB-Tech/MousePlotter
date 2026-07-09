@@ -8,10 +8,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MousePlotter</title>
-    <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="assets/icons/favicon.svg" />
 
     <!--
-      To get timer precision beyond ~100us in Chrome, you MUST serve this page with:
+      To get timer precision beyond ~100 us in Chrome, you MUST serve this page with:
         Cross-Origin-Opener-Policy: same-origin
         Cross-Origin-Embedder-Policy: require-corp
       (and ensure all subresources are COEP-compatible)
@@ -36,7 +36,7 @@
             rel="noopener"
             aria-label="XBAB Tech home"
           >
-            <img class="brand-logo" src="logo.svg" alt="" width="28" height="28" />
+            <img class="brand-logo" src="assets/icons/logo.svg" alt="" width="28" height="28" />
           </a>
           <div class="brand__title">MousePlotter</div>
         </div>
@@ -130,12 +130,12 @@
                     class="stat-value"
                   >
                     <option value="auto" selected>
-                      auto (125µs)
+                      auto (125 µs)
                     </option>
-                    <option value="0.125">125µs</option>
-                    <option value="0.25">250µs</option>
-                    <option value="0.5">500µs</option>
-                    <option value="1">1ms</option>
+                    <option value="0.125">125 µs</option>
+                    <option value="0.25">250 µs</option>
+                    <option value="0.5">500 µs</option>
+                    <option value="1">1 ms</option>
                   </select>
                 </div>
                 <div class="setting">
@@ -211,9 +211,15 @@
                 href="https://github.com/microe1/MouseTester"
                 target="_blank"
                 rel="noopener"
-              >MouseTester</a>
-              by microe1. Both tools plot mouse report data, especially raw
+              >microe1's MouseTester</a>.
+              Both tools plot mouse report data, especially raw
               motion counts, against time.
+            </p>
+            <p>
+              Plot navigation: Double-click to reset. Middle-click and drag to
+              pan. Left-click and drag to zoom, or scroll to zoom. Do these
+              over an axis to reset/pan/zoom only that direction. Click on the
+              legend to toggle traces.
             </p>
             <p>Three useful workflows:</p>
             <ol>
@@ -223,37 +229,34 @@
                 high speeds, and the &Delta;t plot shows your mouse's report
                 interval. Patterns in the x and y counts can sometimes be
                 related to sensor framerate, smoothing, or other aspects of the
-                motion data pipeline.
+                motion data pipeline. Jitter in the &Delta;t plot indicates how
+                stably the browser is receiving mouse data. Note: jitter might
+                increase when the browser's "To show your cursor" dialog is
+                fading in or out.
               </li>
               <li>
                 <strong>Continuous reports.</strong> First, set your mouse to a
                 high DPI such as 6400. Click and hold, move the mouse in
-                medium-speed circles for as long as you like, then release.
-                This shows how stably your browser receives mouse data (or,
-                when importing a CSV, how stably the logging application
-                received it).
+                medium-speed circles for as long as you like, then release. If
+                the jitter in the &Delta;t plot is low enough, you can detect
+                dropped or skipped reports, which show up as jumps of 125 &micro;s for 8 kHz mice.
               </li>
               <li>
                 <strong>DPI measurement.</strong> Place a ruler or a piece of
                 paper with a known length on your mousepad, oriented
                 horizontally. Align a point on the mouse with the start mark.
                 Press Space, move horizontally without rotating the mouse,
-                then press Space again. DPI equals Total X divided by the
-                number of inches traveled. Minimize parallax by keeping your
-                eyes directly above the mouse.
+                then press Space again. Minimize parallax by keeping your
+                eyes directly above the mouse. DPI equals Total X divided by
+                the number of inches traveled. Deviations from the DPI setting
+                are most often due to incorrect sensor height.
               </li>
             </ol>
-            <p>
-              <strong>Plot navigation.</strong> Double-click to reset.
-              Middle-click and drag inside the plot to pan, or on an axis to
-              pan only one direction. Drag a box or scroll over the plot to
-              zoom. Scroll over an axis to zoom only that direction.
-            </p>
           </div>
         </details>
 
         <details class="info-card">
-          <summary>What does jitter in the &Delta;t plot mean?</summary>
+          <summary>What does jitter or fuzziness in the &Delta;t plot mean?</summary>
           <div class="info-card__body">
             <p>
               If the &Delta;t plot looks fuzzy, like the example below, the
@@ -261,16 +264,16 @@
               pipeline.
             </p>
             <figure class="info-figure">
-              <div class="info-figure__placeholder">
-                Placeholder: example of OS-level timing jitter
-              </div>
+              <img src="assets/images/jitter.png" alt="Example of OS-level timing jitter in the &Delta;t plot" width="960" height="250" />
             </figure>
             <p>
               To reduce jitter, many people report that disabling CPU C-states
               helps. Operating system tweaks may help as well, such as forcing
               maximum CPU clock speeds. The browser itself can also be a
-              limiting factor, and standalone applications deliver the best
-              results.
+              limiting factor. For best results, run MousePlotter fullscreen
+              and begin recording only after the "To show your cursor" dialog
+              has faded away. The standalone logging utilities below deliver
+              the cleanest results.
             </p>
             <p>
               Keep in mind mouse firmware cannot directly affect the timing of
@@ -278,33 +281,30 @@
               controller. Host controllers tend to behave very regularly, with
               negligible jitter, as long as bus activity is minimal.
               Therefore, jitter (except for dropped/skipped reports, which
-              show up as jumps of 125&micro;s for 8kHz mice) is caused
+              show up as jumps of 125 &micro;s for 8 kHz mice) is caused
               entirely by operating system and CPU behavior.
             </p>
             <p>
               If the CPU, operating system, and logging application are optimized sufficiently that
-              timing jitter remains consistently less than about 20&micro;s,
+              timing jitter remains consistently less than about 50 &micro;s,
               &Delta;t plots can be used to detect mouse firmware glitches and
               dropped reports.
             </p>
             <p>
               Ideally, under sufficient motion, firmware responds to every
-              poll with a report.
+              poll with a report. Here is an example of a mouse with perfectly
+              behaving firmware on a system with low jitter.
             </p>
-            <p>Here is an example of a mouse with perfectly behaving firmware:</p>
             <figure class="info-figure">
-              <div class="info-figure__placeholder">
-                Placeholder: firmware that responds to every poll
-              </div>
+              <img src="assets/images/stable.png" alt="Example of firmware that responds to every poll" width="960" height="250" />
             </figure>
             <p>
-              Here is an example of a mouse with firmware that skips a poll
-              every few seconds:
+              Here is an example of a mouse with firmware that skips a report
+              every 3.4 seconds roughly. Notice the blips, even in the smoothed
+              &Delta;t trace, around 3400, 6800, 10300 ms.
             </p>
             <figure class="info-figure">
-              <div class="info-figure__placeholder">
-                Placeholder: firmware that skips polls
-              </div>
+              <img src="assets/images/skips.png" alt="Example of firmware that skips reports" width="960" height="250" />
             </figure>
           </div>
         </details>
@@ -354,7 +354,7 @@
           target="_blank"
           rel="noopener"
         >
-          <img class="footer-link-icon" src="discord.svg" alt="" width="16" height="16" />
+          <img class="footer-link-icon" src="assets/icons/discord.svg" alt="" width="16" height="16" />
           Join our Discord
         </a>
         <span class="footer-sep" aria-hidden="true">&middot;</span>
@@ -364,7 +364,7 @@
           target="_blank"
           rel="noopener"
         >
-          <img class="footer-link-icon" src="github.svg" alt="" width="16" height="16" />
+          <img class="footer-link-icon" src="assets/icons/github.svg" alt="" width="16" height="16" />
           View on GitHub
         </a>
       </footer>

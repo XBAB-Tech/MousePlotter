@@ -48,7 +48,7 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   padding: 12px;
-  margin-bottom: 1rem;
+  margin-bottom: 12px;
   width: 100%;
   max-width: var(--content-max-width);
   margin-inline: auto;
@@ -118,7 +118,6 @@ body {
   height: 100%;
   box-sizing: border-box;
   min-width: 0;
-  transition: border-color 0.15s;
 }
 .panel__header {
   font-size: 0.7rem;
@@ -212,7 +211,6 @@ body {
   white-space: nowrap;
   font-weight: 500;
   color: var(--text-muted);
-  transition: color 0.15s, background-color 0.15s;
 }
 .segmented__item + .segmented__item span {
   border-left: 1px solid var(--border);
@@ -248,7 +246,6 @@ body {
   line-height: 1;
   cursor: pointer;
   user-select: none;
-  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
 .btn:hover {
   border-color: var(--border-hover);
@@ -285,11 +282,27 @@ body {
   box-sizing: border-box;
   cursor: pointer;
   user-select: none;
-  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
 }
-#statusIndicator:hover:not(.recording) {
+#statusIndicator:hover:not(.recording):not(.arming) {
   background: var(--surface-hover);
   border-color: var(--border-hover);
+}
+/* "Charging up" state during the hold before recording starts: the border
+   pops red immediately, and a red fill sweeps left-to-right across the button
+   over the delay. The gradient paints behind the label, so text stays legible.
+   When the delay elapses the .arming class is swapped for the solid .recording
+   state, so the two join seamlessly. --arm-duration is set from JS to match. */
+#statusIndicator.arming {
+  border-color: var(--danger);
+  background-image: linear-gradient(var(--danger), var(--danger));
+  background-repeat: no-repeat;
+  background-position: left center;
+  background-size: 0% 100%;
+  animation: recordArm var(--arm-duration, 300ms) linear forwards;
+}
+@keyframes recordArm {
+  from { background-size: 0% 100%; }
+  to { background-size: 100% 100%; }
 }
 #statusIndicator::before {
   content: "";
@@ -354,7 +367,6 @@ body {
   line-height: 1;
   height: var(--control-height);
   padding: 0 10px;
-  transition: border-color 0.15s;
 }
 :is(input, select).stat-value:focus-visible {
   outline: 2px solid var(--text);
@@ -457,7 +469,7 @@ select.stat-value {
 }
 
 .plot-card {
-  margin-top: 16px;
+  margin-top: 12px;
   background: var(--card);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -470,12 +482,14 @@ select.stat-value {
   position: relative;
 }
 #plot {
-  /* Match Plotly's full-size graph exactly: 960x720. */
+  /* Fixed 960x720 (Plotly's size), width-limited only to the container. Height
+     comes solely from aspect-ratio -- never from the viewport -- so the plot is
+     a fixed CSS-pixel box that scales purely with browser zoom. On a short
+     window the page scrolls; the plot does NOT shrink to fit.
+     Do NOT add a vh-based max-height/min-height here: that resizes the plot to
+     the window, fighting the zoom level -- exactly the behavior we don't want. */
   width: min(100%, 960px);
   aspect-ratio: 4 / 3; /* 960x720 */
-  /* Floor below which the two stacked charts + legends become unusable.
-     min-height beats the short-viewport max-height cap below. */
-  min-height: 460px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -488,6 +502,9 @@ select.stat-value {
   align-items: center;
   min-height: 24px;
   padding-bottom: 0;
+  /* Inset the corner controls (crop fields, PNG buttons) to 12px from the card
+     edge -- matching .panel's horizontal padding -- on top of plot-card's 9px. */
+  padding-inline: 3px;
 }
 .plot-title {
   grid-column: 2;
@@ -582,21 +599,91 @@ select.stat-value {
   padding: 0 8px;
 }
 
+.plot-crop {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: start;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plot-crop__field {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.plot-crop__label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.plot-crop__input {
+  width: 7ch;
+  height: 22px;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  padding: 0 4px;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.plot-crop__input::-webkit-outer-spin-button,
+.plot-crop__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.plot-crop__input:focus-visible {
+  outline: none;
+  border-color: var(--text);
+}
+.plot-crop__reset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0;
+  cursor: pointer;
+}
+.plot-crop__reset svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+.plot-crop__reset:hover {
+  color: var(--text);
+}
+.plot-crop__reset:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
 .info-section {
-  margin-top: 16px;
+  margin-top: 12px;
   width: 100%;
   max-width: var(--content-max-width);
   margin-inline: auto;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .info-card {
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
-  transition: border-color 0.15s;
 }
 .info-card:hover {
   border-color: var(--border-hover);
@@ -629,7 +716,6 @@ select.stat-value {
   border-right: 2px solid var(--text-muted);
   border-bottom: 2px solid var(--text-muted);
   transform: translateY(-25%) rotate(45deg);
-  transition: transform 0.15s;
 }
 .info-card[open] > summary::after {
   transform: translateY(25%) rotate(-135deg);
@@ -671,26 +757,8 @@ select.stat-value {
 }
 .info-figure img {
   display: block;
-  max-width: 100%;
-  height: auto;
   margin-inline: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
 }
-.info-figure__placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 110px;
-  padding: 10px;
-  box-sizing: border-box;
-  border: 1px dashed var(--border-hover);
-  border-radius: var(--radius-md);
-  color: var(--text-dim);
-  font-size: 0.85rem;
-  text-align: center;
-}
-
 .app-footer {
   display: flex;
   flex-wrap: wrap;
@@ -725,7 +793,6 @@ select.stat-value {
   color: var(--text);
   font-size: 0.8rem;
   text-decoration: none;
-  transition: color 0.15s, background-color 0.15s;
 }
 .footer-link-icon {
   display: block;
@@ -738,17 +805,4 @@ select.stat-value {
 .footer-link:focus-visible {
   outline: 2px solid var(--text);
   outline-offset: 2px;
-}
-
-/* Cap the plot height on short viewports so it stays mostly visible. */
-@media (max-height: 700px), (max-width: 900px) {
-  #plot {
-    max-height: max(280px, calc(100vh - 260px));
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  * {
-    transition: none !important;
-    scroll-behavior: auto !important;
-  }
 }

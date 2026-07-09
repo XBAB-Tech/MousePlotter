@@ -97,6 +97,35 @@ let isSyncingX = false;
 let recordingMode = ""; // 'space' or 'mouse'
 let plotTitle = "";
 let countsToVelocityScale = NaN;
+// Plot-only crop range (1-based, inclusive). Trims which events are plotted
+// and summarized without touching the recorded data or CSV export. cropEnd
+// stays Infinity ("through the last event") until data is loaded.
+let cropStart = 1;
+let cropEnd = Infinity;
+
+const clampInt = (v, lo, hi) => {
+  const n = Math.round(v);
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+};
+
+function resetCrop() {
+  cropStart = 1;
+  cropEnd = Infinity;
+}
+
+// Event count and count sums over the whole recording, ignoring the crop.
+// The summary always describes the full record; only the plot honors the crop.
+function fullRecordStats() {
+  const count = index / 3;
+  let totalX = 0;
+  let totalY = 0;
+  for (let i = 0; i < count; i++) {
+    totalX += data[i * 3 + 1];
+    totalY += data[i * 3 + 2];
+  }
+  return { count, totalX, totalY };
+}
 
 function ensureDataCapacity(requiredLength) {
   if (requiredLength <= data.length) return;
@@ -107,9 +136,20 @@ function ensureDataCapacity(requiredLength) {
   data = newData;
 }
 
-function extractTriples() {
-  const count = index / 3;
-  if (count === 0) {
+// Extract [t, x, y] triples for events in the 0-based inclusive range
+// [loEvent, hiEvent]. Defaults cover every recorded event, so callers that
+// want the full dataset (e.g. CSV export) can omit the arguments. Timestamps
+// are made relative to the first event in the requested range.
+function extractTriples(loEvent = 0, hiEvent = index / 3 - 1) {
+  const totalCount = index / 3;
+  const lo = totalCount === 0
+    ? 0
+    : Math.max(0, Math.min(loEvent, totalCount - 1));
+  const hi = totalCount === 0
+    ? -1
+    : Math.max(lo, Math.min(hiEvent, totalCount - 1));
+  const count = hi - lo + 1;
+  if (count <= 0) {
     return {
       count: 0,
       ts: new Float64Array(0),
@@ -122,7 +162,7 @@ function extractTriples() {
     };
   }
 
-  const t0 = data[0];
+  const t0 = data[lo * 3];
   const ts = new Float64Array(count);
   const mx = new Float64Array(count);
   const my = new Float64Array(count);
@@ -131,9 +171,10 @@ function extractTriples() {
   let minCount = Infinity;
   let maxCount = -Infinity;
   for (let i = 0; i < count; i++) {
-    ts[i] = data[i * 3] - t0;
-    mx[i] = data[i * 3 + 1];
-    my[i] = data[i * 3 + 2];
+    const b = (lo + i) * 3;
+    ts[i] = data[b] - t0;
+    mx[i] = data[b + 1];
+    my[i] = data[b + 2];
     totalX += mx[i];
     totalY += my[i];
     minCount = Math.min(minCount, mx[i], my[i]);
@@ -185,7 +226,7 @@ function updateTimerResolutionUI() {
     const resUs = resMs * 1000;
     timerResolutionIndicator.textContent = `Timer resolution: ~${
       resUs.toFixed(resUs < 100 ? 1 : 0)
-    }µs`;
+    } µs`;
   } else {
     timerResolutionIndicator.textContent = "Timer resolution: n/a";
   }
@@ -256,6 +297,28 @@ function smoothTimestamps(t, preferredM = 3) {
   return { tSmoothed, trim };
 }
 
+// Estimate the motion rate (counts per ms) on a uniform output grid by placing
+// a unit-area kernel at each event, scaled by that event's count, and summing:
+//
+//   rate(tt) = (1/h) * sum_j K((t[j] - tt) / h) * x[j],   h = windowMs / 3
+//
+// AREA-PRESERVATION INVARIANT: because kernel() integrates to exactly 1, the
+// integral of the returned rate over time equals the sum of the input counts,
+// i.e. the area under each trace is the total distance travelled -- regardless
+// of how noisy or clustered the timestamps are. Each event contributes its full
+// count as *area*; clustering just raises the local rate, never the total.
+//
+// This holds ONLY because we normalize by the fixed bandwidth h, NOT by the
+// local sample density. Dividing by sum(K) instead (to make a weighted mean of
+// counts) would silently destroy the invariant -- don't.
+//
+// The output grid is cropped to [t0 + halfW, tEnd - halfW] so that every
+// emitted point has its full kernel window backed by recorded data (halfW is
+// exactly the kernel support radius, 1.5*h). Points nearer than halfW to either
+// end would integrate a kernel that runs off the data and bias the rate toward
+// zero -- the artificial "cliff" at the trace ends. Rates are in counts/ms for
+// x and y. A recording shorter than windowMs yields no fully-covered point and
+// returns empty output.
 function smoothRatesOnGrid(t, x, y, windowMs = 16, dtOutMs = 1 / 16) {
   if (t.length !== x.length || t.length !== y.length) {
     throw new Error(
@@ -282,8 +345,13 @@ function smoothRatesOnGrid(t, x, y, windowMs = 16, dtOutMs = 1 / 16) {
   const t0 = t[0];
   const tEnd = t[n - 1];
 
-  // Mirrors: np.arange(t[0], t[-1] + dt_out, dt_out)
-  const m = Math.max(0, Math.floor((tEnd - t0) / dtOutMs + 1e-12) + 2);
+  // Crop to points whose full kernel window lies within [t0, tEnd] (see header
+  // note). This trims halfW off each end of np.arange(t[0], t[-1], dt_out).
+  const tStart = t0 + halfW;
+  const tStop = tEnd - halfW;
+  const m = tStop >= tStart
+    ? Math.floor((tStop - tStart) / dtOutMs + 1e-12) + 1
+    : 0;
   const tOut = new Float64Array(m);
   const xOut = new Float64Array(m);
   const yOut = new Float64Array(m);
@@ -291,7 +359,7 @@ function smoothRatesOnGrid(t, x, y, windowMs = 16, dtOutMs = 1 / 16) {
   let s = 0;
   let e = 0;
   for (let i = 0; i < m; i++) {
-    const tt = t0 + i * dtOutMs;
+    const tt = tStart + i * dtOutMs;
     tOut[i] = tt;
 
     while (s < n && t[s] <= tt - halfW) s++;
@@ -499,6 +567,7 @@ async function importCsvFile(file) {
     mx: parsed.mx,
     my: parsed.my,
   });
+  resetCrop();
   statusIndicator.textContent = `Imported ${parsed.ts.length} samples`;
   renderPlot(true);
 }
@@ -557,6 +626,23 @@ function forceEnableRecording() {
   if (unsupportedNotice) unsupportedNotice.hidden = true;
 }
 
+// Enter pointer lock. Must be called synchronously from a user gesture.
+// A no-op if already locked, so calling it again from startRecording is safe.
+async function requestPointerLock() {
+  if (document.pointerLockElement) return;
+  try {
+    await document.body.requestPointerLock({
+      unadjustedMovement: true,
+    });
+  } catch {
+    try {
+      await document.body.requestPointerLock();
+    } catch {
+      // Ignore (may be blocked by permissions/user settings)
+    }
+  }
+}
+
 async function startRecording(mode = "space") {
   if (!recordingEnabled) return;
   index = 0;
@@ -572,19 +658,7 @@ async function startRecording(mode = "space") {
   statTotalY.textContent = "0";
   periodSelect.value = "auto";
 
-  if (!document.pointerLockElement) {
-    try {
-      await document.body.requestPointerLock({
-        unadjustedMovement: true,
-      });
-    } catch {
-      try {
-        await document.body.requestPointerLock();
-      } catch {
-        // Ignore (may be blocked by permissions/user settings)
-      }
-    }
-  }
+  await requestPointerLock();
 
   currentEventType = radioRaw.checked && rawSupported
     ? "pointerrawupdate"
@@ -601,6 +675,7 @@ function stopRecording() {
   statusIndicator.textContent = idleText;
   statusIndicator.classList.remove("recording");
   if (document.pointerLockElement) document.exitPointerLock();
+  resetCrop();
   renderPlot();
 }
 
@@ -653,6 +728,102 @@ plotActionsEl.className = "plot-actions";
 if (savePngBtn) plotActionsEl.append(savePngBtn);
 if (copyPngBtn) plotActionsEl.append(copyPngBtn);
 if (plotActionsEl.childElementCount > 0) plotHeaderEl.append(plotActionsEl);
+// Start/End crop controls, mirroring the PNG buttons in the opposite header
+// corner. They trim the plotted/summarized event range only (see renderPlot);
+// the recorded data and CSV export are unaffected.
+const plotCropEl = document.createElement("div");
+plotCropEl.className = "plot-crop";
+plotCropEl.style.display = "none";
+function makeCropField(labelText) {
+  const field = document.createElement("label");
+  field.className = "plot-crop__field";
+  const label = document.createElement("span");
+  label.className = "plot-crop__label";
+  label.textContent = labelText;
+  const input = document.createElement("input");
+  input.type = "number";
+  input.className = "plot-crop__input";
+  input.min = "1";
+  input.step = "1";
+  input.inputMode = "numeric";
+  // Scroll over the box to nudge the value by ±1 (up = increment).
+  input.addEventListener("wheel", (e) => {
+    if (isRecording || e.deltaY === 0) return;
+    const totalCount = index / 3;
+    if (totalCount === 0) return;
+    e.preventDefault();
+    const cur = clampInt(parseInt(input.value, 10), 1, totalCount);
+    input.value = String(clampInt(cur + (e.deltaY < 0 ? 1 : -1), 1, totalCount));
+    applyCropFromInputs();
+  }, { passive: false });
+  field.append(label, input);
+  return input;
+}
+const cropStartInput = makeCropField("Start");
+const cropEndInput = makeCropField("End");
+// Reset the trim back to the full recorded range. Sits after the End field so
+// the controls read Start / End / reset left-to-right as one cluster. Reuses
+// resetCrop() so a click is equivalent to never having trimmed.
+const cropResetBtn = document.createElement("button");
+cropResetBtn.type = "button";
+cropResetBtn.className = "plot-crop__reset";
+cropResetBtn.title = "Reset trim to full range";
+cropResetBtn.setAttribute("aria-label", "Reset trim to full range");
+// Drawn as an SVG arc so it renders truly round, not the oval that font
+// glyphs like "↺" produce.
+cropResetBtn.innerHTML =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+  'aria-hidden="true"><polyline points="1 4 1 10 7 10"></polyline>' +
+  '<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>';
+cropResetBtn.addEventListener("click", () => {
+  if (isRecording || index === 0) return;
+  resetCrop();
+  renderPlot(true);
+});
+plotCropEl.append(
+  cropStartInput.parentElement,
+  cropEndInput.parentElement,
+  cropResetBtn,
+);
+plotHeaderEl.append(plotCropEl);
+
+function updateCropUI(totalCount, lo, hi) {
+  // Always visible; blank and read-only (accepts no input) until there's
+  // data to crop.
+  plotCropEl.style.display = "";
+  const hasData = totalCount > 0;
+  cropStartInput.readOnly = !hasData;
+  cropEndInput.readOnly = !hasData;
+  if (!hasData) {
+    cropStartInput.value = "";
+    cropEndInput.value = "";
+    cropResetBtn.style.display = "none";
+    return;
+  }
+  cropStartInput.max = String(totalCount);
+  cropEndInput.max = String(totalCount);
+  cropStartInput.value = String(lo + 1);
+  cropEndInput.value = String(hi + 1);
+  // Only show the reset control when the trim actually hides part of the record.
+  const trimmed = lo !== 0 || hi !== totalCount - 1;
+  cropResetBtn.style.display = trimmed ? "" : "none";
+}
+
+function applyCropFromInputs() {
+  if (isRecording) return;
+  const totalCount = index / 3;
+  if (totalCount === 0) return;
+  let s = clampInt(parseInt(cropStartInput.value, 10), 1, totalCount);
+  let e = clampInt(parseInt(cropEndInput.value, 10), 1, totalCount);
+  if (s > e) [s, e] = [e, s];
+  cropStart = s;
+  cropEnd = e;
+  renderPlot(true);
+}
+cropStartInput.addEventListener("change", applyCropFromInputs);
+cropEndInput.addEventListener("change", applyCropFromInputs);
+
 const topChartEl = document.createElement("div");
 topChartEl.className = "plot-chart plot-chart--top";
 const sharedLegendEl = document.createElement("div");
@@ -1046,6 +1217,10 @@ function makeAxisLineHook({ left = false, right = false, bottom = false }) {
 // drag stays box-zoom, double-click stays reset-to-home.
 const WHEEL_ZOOM_FACTOR = 0.75;
 
+// Minimum drag length (CSS px) for an axis box-zoom to count; shorter drags
+// are treated as clicks and just clear the selection.
+const AXIS_ZOOM_MIN_PX = 5;
+
 function wheelZoomFactor(e) {
   return e.deltaY < 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR;
 }
@@ -1252,6 +1427,95 @@ function bindAxisWheelZoom(u, { leftYScale, rightYScale = null } = {}) {
     document.addEventListener("mousemove", onMove, { passive: false });
     document.addEventListener("mouseup", onUp);
   });
+
+  // Left-drag on an axis draws a gray selection region (like the main plot's
+  // box zoom) and zooms only that axis on release, leaving the other axis
+  // untouched. The zoom applies once, on mouseup — not while dragging.
+  u.root.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || e.shiftKey || u.scales.x.min == null) return;
+    const hit = axisHit(u, axisOpts, e);
+    if (!hit) return;
+    const sc = u.scales[hit.scaleKey];
+    if (sc?.min == null || sc?.max == null || hit.spanPx <= 0) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    const overRect = u.over.getBoundingClientRect();
+    if (overRect.width <= 0 || overRect.height <= 0) return;
+    const isX = hit.axis === "x";
+    const spanPx = isX ? overRect.width : overRect.height;
+    const startPx = isX
+      ? e.clientX - overRect.left
+      : e.clientY - overRect.top;
+    // An x-zoom affects both charts (x is shared), so mirror the band onto the
+    // sibling. The charts are horizontally aligned, so the same over-relative
+    // px map to the same x on both.
+    const sib = isX ? (u === topChart ? botChart : topChart) : null;
+    const sibH = sib ? sib.over.getBoundingClientRect().height : 0;
+
+    // Selection edges [a, b] clamped to the plot area, in over-relative px.
+    const edges = (ev) => {
+      const cur = isX ? ev.clientX - overRect.left : ev.clientY - overRect.top;
+      return {
+        a: Math.max(0, Math.min(startPx, cur)),
+        b: Math.min(spanPx, Math.max(startPx, cur)),
+      };
+    };
+    const CLEARED = { left: 0, top: 0, width: 0, height: 0 };
+    const clearSelect = () => {
+      u.setSelect(CLEARED, false);
+      if (sib) sib.setSelect(CLEARED, false);
+    };
+
+    const onMove = (ev) => {
+      ev.preventDefault();
+      const { a, b } = edges(ev);
+      u.setSelect(
+        isX
+          ? { left: a, top: 0, width: b - a, height: overRect.height }
+          : { left: 0, top: a, width: overRect.width, height: b - a },
+        false,
+      );
+      if (sib) {
+        sib.setSelect({ left: a, top: 0, width: b - a, height: sibH }, false);
+      }
+    };
+    const onUp = (ev) => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      const { a, b } = edges(ev);
+      // Clear the gray region first so the zoom redraw doesn't flash it.
+      clearSelect();
+      // Ignore a plain click or a too-small drag.
+      if (b - a < AXIS_ZOOM_MIN_PX) return;
+      if (isX) {
+        u.setScale("x", { min: u.posToVal(a, "x"), max: u.posToVal(b, "x") });
+      } else {
+        // Pixel space runs top-down, so the top edge is the larger value.
+        u.setScale(hit.scaleKey, {
+          min: u.posToVal(b, hit.scaleKey),
+          max: u.posToVal(a, hit.scaleKey),
+        });
+      }
+    };
+    document.addEventListener("mousemove", onMove, { passive: false });
+    document.addEventListener("mouseup", onUp);
+  });
+
+  // Double-click on an axis restores its default range only, mirroring the
+  // plot-area double-click (which resets everything). The setScale hooks then
+  // handle the paired concerns: x syncs to the other chart, y/vel stay locked,
+  // and dt's tick mode reverts to linear.
+  u.root.addEventListener("dblclick", (e) => {
+    if (!homeRanges) return;
+    const hit = axisHit(u, axisOpts, e);
+    if (!hit) return;
+    const home = homeRanges[hit.scaleKey];
+    if (!home) return;
+    e.preventDefault();
+    e.stopPropagation();
+    u.setScale(hit.scaleKey, { min: home[0], max: home[1] });
+  });
 }
 
 function niceTicks(min, max, targetCount) {
@@ -1406,7 +1670,7 @@ function makeBotOpts(width, height) {
       ],
       drawAxes: [
         makeZeroLineHook("dt"),
-        makeAxisLineHook({ left: true, bottom: true }),
+        makeAxisLineHook({ left: true }),
       ],
     },
   };
@@ -1421,12 +1685,29 @@ function mountAnnotation() {
 }
 
 function renderPlot(allowEmpty = false) {
-  const count = index / 3;
-  if (count === 0 && !allowEmpty) return;
+  const totalCount = index / 3;
+  if (totalCount === 0 && !allowEmpty) return;
   if (!window.uPlot) {
     plotDiv.textContent = "uPlot failed to load.";
     return;
   }
+
+  // Resolve the crop range (1-based, inclusive) to 0-based event indices,
+  // normalizing the stored values so re-renders stay stable.
+  let cropLo = 0;
+  let cropHi = -1;
+  if (totalCount > 0) {
+    cropLo = clampInt(cropStart, 1, totalCount) - 1;
+    cropHi = clampInt(
+      Number.isFinite(cropEnd) ? cropEnd : totalCount,
+      cropLo + 1,
+      totalCount,
+    ) - 1;
+    cropStart = cropLo + 1;
+    cropEnd = cropHi + 1;
+  }
+  updateCropUI(totalCount, cropLo, cropHi);
+  const count = totalCount === 0 ? 0 : cropHi - cropLo + 1;
 
   let ts;
   let mx;
@@ -1439,8 +1720,6 @@ function renderPlot(allowEmpty = false) {
   let dtRaw;
   let dtSmoothT;
   let dtSmooth;
-  let totalX = 0;
-  let totalY = 0;
   let minCount = Infinity;
   let maxCount = -Infinity;
   let guessed = 1.0;
@@ -1460,34 +1739,48 @@ function renderPlot(allowEmpty = false) {
     maxCount = 10;
     periodSelect.options[0].textContent = AUTO_PERIOD_LABEL;
   } else {
-    const extracted = extractTriples();
-    ({ ts, mx, my } = extracted);
+    // The smoothed traces (velocity + Δt) are always computed from the FULL
+    // recording so that trimming via Start/End never recalculates them — a
+    // crop only windows the view and trims the raw markers. Both raw and
+    // smoothed share the full time base (timestamps relative to the first
+    // recorded event) so they stay aligned when only part is shown.
+    const full = extractTriples();
+    const cropEndEx = cropHi + 1; // exclusive slice bound
+
+    ts = full.ts.subarray(cropLo, cropEndEx);
+    mx = full.mx.subarray(cropLo, cropEndEx);
+    my = full.my.subarray(cropLo, cropEndEx);
+
+    // Counts autoscale to the cropped markers only.
+    for (let i = 0; i < count; i++) {
+      minCount = Math.min(minCount, mx[i], my[i]);
+      maxCount = Math.max(maxCount, mx[i], my[i]);
+    }
+
+    // Raw Δt markers cover the cropped range; the smoothed Δt line (below)
+    // spans the whole recording.
     dtRawT = count > 1 ? new Float64Array(count - 1) : new Float64Array(0);
     dtRaw = count > 1 ? new Float64Array(count - 1) : new Float64Array(0);
-
-    totalX = extracted.totalX;
-    totalY = extracted.totalY;
-    minCount = extracted.minCount;
-    maxCount = extracted.maxCount;
     for (let i = 1; i < count; i++) {
       dtRawT[i - 1] = 0.5 * (ts[i] + ts[i - 1]);
       dtRaw[i - 1] = ts[i] - ts[i - 1];
     }
 
-    statEvents.textContent = count;
-    statTotalX.textContent = totalX;
-    statTotalY.textContent = totalY;
+    const rec = fullRecordStats();
+    statEvents.textContent = rec.count;
+    statTotalX.textContent = rec.totalX;
+    statTotalY.textContent = rec.totalY;
 
-    // Update period dropdown: set auto option text to guessed value
-    ({ tSmoothed, trim } = smoothTimestamps(ts, 3));
-    mxTrim = mx.subarray(trim, mx.length - trim);
-    myTrim = my.subarray(trim, my.length - trim);
+    // Auto period guess and smoothing run on the full record (crop-independent).
+    ({ tSmoothed, trim } = smoothTimestamps(full.ts, 3));
+    mxTrim = full.mx.subarray(trim, full.mx.length - trim);
+    myTrim = full.my.subarray(trim, full.my.length - trim);
 
     guessed = guessPeriod(mxTrim, myTrim, tSmoothed);
     const guessedUs = guessed * 1000;
     periodSelect.options[0].textContent = guessedUs < 1000
-      ? `auto (${guessedUs}µs)`
-      : `auto (${guessed}ms)`;
+      ? `auto (${guessedUs} µs)`
+      : `auto (${guessed} ms)`;
 
     if (tSmoothed.length > 1) {
       dtSmoothT = new Float64Array(tSmoothed.length - 1);
@@ -1527,7 +1820,7 @@ function renderPlot(allowEmpty = false) {
   const SMOOTH_DTOUT_MS = 1 / 16;
   const SMOOTH_MAX_POINTS = 200_000;
   let dtOutMs = SMOOTH_DTOUT_MS;
-  if (count > 1) {
+  if (tSmoothed.length > 1) {
     const spanMs = tSmoothed[tSmoothed.length - 1] - tSmoothed[0];
     if (Number.isFinite(spanMs) && spanMs > 0) {
       const estimatedPoints = spanMs / dtOutMs + 2;
@@ -1551,13 +1844,7 @@ function renderPlot(allowEmpty = false) {
     yVelSmooth[i] = yRate[i] * countsPerMsToVelocity;
   }
 
-  let periodLabel = "auto";
-  if (Number.isFinite(periodMs) && periodMs > 0) {
-    const digits = periodMs < 1 ? 3 : periodMs < 10 ? 2 : 1;
-    periodLabel = `${periodMs.toFixed(digits).replace(/\.?0+$/, "")}ms`;
-  }
-  const dpiText = `${Math.round(dpiVal)}dpi`;
-  plotInfoText = `${dpiText}\n${periodLabel}`;
+  plotInfoText = `${Math.round(dpiVal)} dpi`;
 
   // Default ("home") ranges, matching the Plotly layout:
   // counts padded 5%, velocity locked to counts, Δt [0, 4 * period].
@@ -1815,17 +2102,42 @@ window.addEventListener("keyup", (e) => {
   e.stopPropagation();
 }, { capture: true });
 
-// Click-and-drag recording on the status indicator
+// Click-and-drag recording on the status indicator. Pointer lock engages
+// immediately on press, but recording is delayed so the browser's "To show
+// your cursor" dialog has finished fading in. During that hold the button
+// shows a red "charging" fill (the .arming class). Releasing before the delay
+// elapses cancels everything — nothing gets recorded.
+const RECORD_START_DELAY_MS = 400;
+let pendingRecordTimer = null;
+
+function cancelArming() {
+  pendingRecordTimer = null;
+  statusIndicator.classList.remove("arming");
+}
+
 statusIndicator.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return; // Only left click
   e.preventDefault();
-  if (!isRecording) {
+  if (isRecording || pendingRecordTimer !== null) return;
+  if (!recordingEnabled) return;
+  requestPointerLock();
+  statusIndicator.style.setProperty("--arm-duration", `${RECORD_START_DELAY_MS}ms`);
+  statusIndicator.classList.add("arming");
+  pendingRecordTimer = setTimeout(() => {
+    cancelArming();
     startRecording("mouse");
-  }
+  }, RECORD_START_DELAY_MS);
 });
 
 window.addEventListener("mouseup", (e) => {
   if (e.button !== 0) return;
+  if (pendingRecordTimer !== null) {
+    // Released within the delay: cancel, release the lock, record nothing.
+    clearTimeout(pendingRecordTimer);
+    cancelArming();
+    if (document.pointerLockElement) document.exitPointerLock();
+    return;
+  }
   if (isRecording && recordingMode === "mouse") {
     stopRecording();
   }
