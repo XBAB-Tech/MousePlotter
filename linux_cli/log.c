@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 XBAB Tech, LLC
+// SPDX-License-Identifier: MIT
+
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>

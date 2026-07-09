@@ -5,8 +5,8 @@ sensor quality. Inspired by [MouseTester](https://github.com/microe1/MouseTester
 
 - [`public/`](public) - the web app, hosted at
   [mouseplotter.xbabtech.com](https://mouseplotter.xbabtech.com). Record mouse
-  reports in-browser or import a CSV to plot and analyze a session. For high
-  timer resolution in-browser recording, serve locally with
+  reports in-browser or import a CSV to plot and analyze a session. To serve
+  locally with high timer resolution in-browser recording, run
   `python3 serve.py` (sets the COOP/COEP headers needed for high-resolution
   timers).
 
@@ -27,7 +27,7 @@ sensor quality. Inspired by [MouseTester](https://github.com/microe1/MouseTester
 ## License
 
 Root [LICENSE](LICENSE) (AGPL-3.0) covers `public/`. `linux_cli/` and
-`windows_gui/` each carry their own `LICENSE` (GPL-3.0), which takes
+`windows_gui/` each carry their own `LICENSE` (MIT), which takes
 precedence for those directories.
 
 ---

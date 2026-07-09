@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 XBAB Tech, LLC
-// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 //
 // MousePlotter Windows GUI logger.
 //
