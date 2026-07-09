@@ -12,14 +12,17 @@ sensor quality.
   `python3 serve.py` (sets the COOP/COEP headers needed for high-resolution
   timers).
 
-  Browser/OS combos that work well for in-browser recording:
-  - Chromium-based browsers on Linux
-  - Chromium-based browsers on Windows
-  - macOS: only Safari works, and with significant jitter and sometimes
-    coalesced data
+  OS/Browser combos that work well for in-browser recording:
+  - Linux: Chromium-based browsers.
+  - Windows: Chromium-based browsers.
+  - macOS: Safari gives mostly uncoalesced data, though with significant
+    jitter. Other browsers coalesce data.
 - [`linux_cli/`](linux_cli) - Linux command-line logger. Records un-coalesced
   mouse reports via `evdev`/raw input and writes `log.csv`. Build with `make`
-  (produces `mouseplotter-log`).
+  (produces `mouseplotter-log`). For a portable binary to distribute (e.g. on
+  GitHub Releases), use `make release` (needs [Zig](https://ziglang.org/download/)
+  as a C toolchain): a static musl build with no host glibc dependency, so it
+  runs on any x86_64 Linux distro/kernel.
 - [`windows_gui/`](windows_gui) - Windows GUI logger, same recording logic as
   the CLI. Build with `build.bat` (needs [Zig](https://ziglang.org/download/)
   as a C toolchain) or `make`, producing `MousePlotter-Log.exe`.
