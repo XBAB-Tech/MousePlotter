@@ -3,11 +3,17 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+/* The palette is split into a light and a dark block, both keyed off the
+   data-theme attribute that the inline script in index.html sets before first
+   paint. app.js reads the --plot-* / --text / --card / --border values straight
+   off :root at draw time, so every plot color lives here too. */
 :root {
+  color-scheme: light;
   --bg: #ffffff;
   --surface: #ffffff;
   --card: #ffffff; /* alias read by app.js for the plot theme */
   --surface-hover: #f4f4f4;
+  --surface-active: #eeeeee;
   --border: #dcdcdc;
   --border-hover: #b0b0b0;
   --border-strong: #cfcfcf;
@@ -16,14 +22,48 @@
   --text-dim: #9a9a9a;
   --danger: #fb2c36;
   --danger-border: rgba(239, 68, 68, 0.55);
+  --plot-axis: #000000;
+  --plot-grid: rgba(0, 0, 0, 0.07);
+  --plot-select: rgba(0, 0, 0, 0.07);
+  --plot-x: #0072b2;
+  --plot-x-smooth: #005686;
+  --plot-y: #d55e00;
+  --plot-y-smooth: #a04700;
+  --plot-dt: #009e73;
+  --plot-dt-smooth: #004f3a;
   --radius-md: 0.375rem;
   --radius-lg: 0.75rem;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --content-max-width: 980px;
   --control-height: 32px;
 }
-html {
-  color-scheme: light;
+/* The plot colors are not the light ones darkened: the raw markers are drawn
+   at 50% alpha, so they need a light base to stay legible against the card,
+   and the smoothed line then has to sit lighter still to read on top of the
+   marker cloud -- the inverse of the light theme, where it sits darker. Hues
+   stay on the Okabe-Ito wheel so the x/y pair remains color-blind safe. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f0f11;
+  --surface: #18181b;
+  --card: #18181b;
+  --surface-hover: #26262b;
+  --surface-active: #303036;
+  --border: #2e2e33;
+  --border-hover: #55555f;
+  --border-strong: #3a3a41;
+  --text: #f2f2f3;
+  --text-muted: #a0a0a8;
+  --text-dim: #71717a;
+  --plot-axis: #c9c9d1;
+  --plot-grid: rgba(255, 255, 255, 0.1);
+  --plot-select: rgba(255, 255, 255, 0.14);
+  --plot-x: #56b4e9;
+  --plot-x-smooth: #a8d8f0;
+  --plot-y: #ff8f33;
+  --plot-y-smooth: #ffc79c;
+  --plot-dt: #2ed1a3;
+  --plot-dt-smooth: #9ce9cc;
 }
 body {
   font-family: var(--font-ui);
@@ -65,6 +105,51 @@ body {
   align-items: center;
   justify-content: center;
   text-align: center;
+  /* Anchor for the theme toggle, which is taken out of flow so that parking it
+     at the right edge does not pull the logo and title off center. */
+  position: relative;
+}
+.theme-toggle {
+  appearance: none;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height);
+  height: var(--control-height);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.theme-toggle:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: var(--border-hover);
+}
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+.theme-toggle__icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+/* Each theme shows the icon of the theme the button switches to. */
+.theme-toggle__icon--sun {
+  display: none;
+}
+:root[data-theme="dark"] .theme-toggle__icon--sun {
+  display: block;
+}
+:root[data-theme="dark"] .theme-toggle__icon--moon {
+  display: none;
 }
 .brand-logo-link {
   display: inline-flex;
@@ -216,7 +301,7 @@ body {
   border-left: 1px solid var(--border);
 }
 .segmented__item input:checked + span {
-  background: #eeeeee;
+  background: var(--surface-active);
   color: var(--text);
   font-weight: 500;
 }
@@ -579,6 +664,11 @@ select.stat-value {
 .u-over.is-panning {
   cursor: grabbing;
 }
+/* uPlot hardcodes the box-zoom shade to rgba(0,0,0,0.07), which is invisible
+   on a dark card. */
+.u-select {
+  background: var(--plot-select);
+}
 .plot-info-box {
   position: absolute;
   top: 4px;
@@ -758,6 +848,10 @@ select.stat-value {
 .info-figure img {
   display: block;
   margin-inline: auto;
+  /* The example plots are white-background screenshots. Framing them keeps
+     them from reading as a blown-out hole in the dark theme. */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
 }
 .app-footer {
   display: flex;
@@ -797,6 +891,11 @@ select.stat-value {
 .footer-link-icon {
   display: block;
   flex-shrink: 0;
+}
+/* Both marks ship as black-on-transparent glyphs, and an <img> cannot pick up
+   currentColor. */
+:root[data-theme="dark"] .footer-link-icon {
+  filter: invert(1);
 }
 .footer-link:hover {
   color: var(--text);

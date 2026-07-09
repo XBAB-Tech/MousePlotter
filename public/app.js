@@ -22,6 +22,7 @@ const copyPngBtn = $("copyPngBtn");
 const forceTestBtn = $("forceTestBtn");
 const unsupportedNotice = $("unsupportedNotice");
 const unsupportedNoticeDetail = $("unsupportedNoticeDetail");
+const themeToggleBtn = $("themeToggleBtn");
 const DEFAULT_CSV_FILENAME = "mouseplotter.csv";
 
 const AUTO_PERIOD_LABEL = periodSelect?.options?.[0]?.textContent || "auto";
@@ -79,11 +80,29 @@ const PLOT_TICK_FONT = `${PLOT_TICK_FONT_SIZE}px ${PLOT_FONT_FAMILY}`;
 const PLOT_AXIS_LABEL_FONT =
   `${PLOT_AXIS_LABEL_FONT_SIZE}px ${PLOT_FONT_FAMILY}`;
 
+// getComputedStyle returns a live declaration, so these getters always report
+// the palette of the theme currently on :root. uPlot re-invokes axis and series
+// color functions on every draw, which is why switching themes only needs a
+// redraw rather than a rebuild -- see applyTheme().
 const rootStyle = getComputedStyle(document.documentElement);
+const cssVar = (name, fallback) =>
+  rootStyle.getPropertyValue(name).trim() || fallback;
 const THEME = {
-  text: rootStyle.getPropertyValue("--text").trim() || "#0f172a",
-  card: rootStyle.getPropertyValue("--card").trim() || "#ffffff",
-  border: rootStyle.getPropertyValue("--border").trim() || "rgba(0,0,0,0.15)",
+  get text() {
+    return cssVar("--text", "#0f172a");
+  },
+  get card() {
+    return cssVar("--card", "#ffffff");
+  },
+  get border() {
+    return cssVar("--border", "rgba(0,0,0,0.15)");
+  },
+  get axis() {
+    return cssVar("--plot-axis", "#000000");
+  },
+  get grid() {
+    return cssVar("--plot-grid", "rgba(0,0,0,0.07)");
+  },
 };
 
 let isRecording = false;
@@ -690,12 +709,15 @@ function stopRecording() {
 // each chart's series are aligned onto a union x-array with uPlot.join().
 // ---------------------------------------------------------------------------
 
-const COLOR_X = "#0072B2";
-const COLOR_X_SMOOTH = "#005686";
-const COLOR_Y = "#D55E00";
-const COLOR_Y_SMOOTH = "#A04700";
-const COLOR_DT = "#009E73";
-const COLOR_DT_SMOOTH = "#004F3A";
+// Series colors live in styles.css alongside the rest of the palette. Each is
+// a function so that uPlot, the shared legend, and the PNG export all pick up
+// the current theme at the moment they draw.
+const COLOR_X = () => cssVar("--plot-x", "#0072B2");
+const COLOR_X_SMOOTH = () => cssVar("--plot-x-smooth", "#005686");
+const COLOR_Y = () => cssVar("--plot-y", "#D55E00");
+const COLOR_Y_SMOOTH = () => cssVar("--plot-y-smooth", "#A04700");
+const COLOR_DT = () => cssVar("--plot-dt", "#009E73");
+const COLOR_DT_SMOOTH = () => cssVar("--plot-dt-smooth", "#004F3A");
 const SMOOTH_LINE_WIDTH = 2;
 const PLOT_PX_ALIGN = 0;
 
@@ -923,7 +945,7 @@ function markerSeries(label, color, scale, value) {
       show: true,
       size: 4,
       width: 0,
-      fill: hexToRgba(color, 0.5),
+      fill: () => hexToRgba(color(), 0.5),
       filter: decimatedPointsFilter,
     },
     value,
@@ -956,7 +978,7 @@ function getPlotLegendEntries() {
         chart,
         seriesIdx,
         label: sr.label,
-        color: sr.mpColor || sr.stroke || "#000000",
+        color: sr.mpColor ? sr.mpColor() : "#000000",
         kind: sr.mpKind || "line",
         show: sr.show !== false,
       });
@@ -1135,7 +1157,19 @@ function applyHomeRanges() {
   }
 }
 
-// uPlot's global pxAlign is disabled for smoother traces, so black axis lines
+// Point the tick labels, gridlines, and tick marks at the live theme. This runs
+// after construction rather than through the axis opts because uPlot fills in
+// the grid/ticks defaults with objects it shares between axes, so the copies
+// here keep a stroke override from leaking into every other chart.
+function applyChartTheme(chart) {
+  for (const axis of chart.axes) {
+    axis.stroke = () => THEME.text;
+    axis.grid = { ...axis.grid, stroke: () => THEME.grid };
+    axis.ticks = { ...axis.ticks, stroke: () => THEME.grid };
+  }
+}
+
+// uPlot's global pxAlign is disabled for smoother traces, so the axis lines
 // are drawn by hooks below where we can align them to the device-pixel grid.
 const AXIS_BORDER = { show: false };
 const AXIS_TEXT = {
@@ -1172,7 +1206,7 @@ function makeZeroLineHook(scaleKey) {
     const y = crispStrokePos(u.valToPos(0, scaleKey, true), lw);
     const { ctx } = u;
     ctx.save();
-    ctx.strokeStyle = "#000000";
+    ctx.strokeStyle = THEME.axis;
     ctx.lineWidth = lw;
     ctx.beginPath();
     ctx.moveTo(u.bbox.left, y);
@@ -1191,7 +1225,7 @@ function makeAxisLineHook({ left = false, right = false, bottom = false }) {
     const y1 = crispStrokePos(u.bbox.top + u.bbox.height, lw);
     const { ctx } = u;
     ctx.save();
-    ctx.strokeStyle = "#000000";
+    ctx.strokeStyle = THEME.axis;
     ctx.lineWidth = lw;
     ctx.beginPath();
     if (left) {
@@ -1897,6 +1931,8 @@ function renderPlot(allowEmpty = false) {
     botData,
     botChartEl,
   );
+  applyChartTheme(topChart);
+  applyChartTheme(botChart);
   bindWheelPanZoom(topChart, ["y", "vel"]);
   bindWheelPanZoom(botChart, ["dt"]);
   bindAxisWheelZoom(topChart, { leftYScale: "y", rightYScale: "vel" });
@@ -1915,6 +1951,59 @@ function renderPlot(allowEmpty = false) {
     requestAnimationFrame(layoutCharts);
   });
 }
+
+// ---------------------------------------------------------------------------
+// Theme. The inline script in index.html resolves the initial theme before the
+// first paint; every change after that goes through applyTheme().
+// ---------------------------------------------------------------------------
+
+const THEME_STORAGE_KEY = "mouseplotter-theme";
+const darkModeQuery = matchMedia("(prefers-color-scheme: dark)");
+
+// Null until the visitor toggles at least once, which is what leaves the OS
+// preference in charge up to that point.
+function storedTheme() {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function currentTheme() {
+  return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  if (themeToggleBtn) {
+    const hint = `Switch to ${theme === "dark" ? "light" : "dark"} mode`;
+    themeToggleBtn.title = hint;
+    themeToggleBtn.setAttribute("aria-label", hint);
+  }
+  // The charts resolve every color from :root as they draw, so they just need to
+  // be told to repaint. redraw(false, false) reuses the cached paths and, unlike
+  // a full renderPlot(), leaves the current zoom and pan untouched. The legend
+  // swatches are plain DOM, so they get rebuilt.
+  renderSharedLegend();
+  topChart?.redraw(false, false);
+  botChart?.redraw(false, false);
+}
+
+themeToggleBtn?.addEventListener("click", () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch {
+    // Storage can be blocked; the choice still holds for this page view.
+  }
+  applyTheme(next);
+});
+
+// Follow the OS until the visitor picks a side for themselves.
+darkModeQuery.addEventListener("change", (e) => {
+  if (storedTheme() === null) applyTheme(e.matches ? "dark" : "light");
+});
 
 // ---------------------------------------------------------------------------
 // PNG export: compose both chart canvases (plus title, legend, and info box)
@@ -1966,7 +2055,7 @@ function renderPlotPngCanvas() {
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = THEME.card || "#ffffff";
+  ctx.fillStyle = THEME.card;
   ctx.fillRect(0, 0, width, height);
 
   if (plotTitle) {
@@ -1998,9 +2087,9 @@ function renderPlotPngCanvas() {
     const boxH = lines.length * lineH + padY * 2;
     const boxX = bb.left + bb.width - boxW - 4 * s;
     const boxY = titleH + bb.top + 4 * s;
-    ctx.fillStyle = THEME.card || "#ffffff";
+    ctx.fillStyle = THEME.card;
     ctx.fillRect(boxX, boxY, boxW, boxH);
-    ctx.strokeStyle = THEME.border || "#dcdcdc";
+    ctx.strokeStyle = THEME.border;
     ctx.lineWidth = Math.max(1, Math.round(s));
     ctx.strokeRect(boxX + 0.5, boxY + 0.5, boxW, boxH);
     ctx.fillStyle = THEME.text;
@@ -2204,6 +2293,7 @@ const plotResizeObserver = new ResizeObserver(() => {
 });
 plotResizeObserver.observe(plotDiv);
 
+applyTheme(currentTheme());
 initPlatformGate();
 updateTimerResolutionUI();
 renderPlot(true);
