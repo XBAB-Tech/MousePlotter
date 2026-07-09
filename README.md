@@ -1,9 +1,7 @@
 # MousePlotter
 
 Records raw mouse input and plots it, for checking polling rate, jitter, and
-sensor quality.
-
-## Layout
+sensor quality. Inspired by [MouseTester](https://github.com/microe1/MouseTester).
 
 - [`public/`](public) - the web app, hosted at
   [mouseplotter.xbabtech.com](https://mouseplotter.xbabtech.com). Record mouse
@@ -19,10 +17,9 @@ sensor quality.
     jitter. Other browsers coalesce data.
 - [`linux_cli/`](linux_cli) - Linux command-line logger. Records un-coalesced
   mouse reports via `evdev`/raw input and writes `log.csv`. Build with `make`
-  (produces `mouseplotter-log`). For a portable binary to distribute (e.g. on
-  GitHub Releases), use `make release` (needs [Zig](https://ziglang.org/download/)
-  as a C toolchain): a static musl build with no host glibc dependency, so it
-  runs on any x86_64 Linux distro/kernel.
+  (produces `mouseplotter-log`). For a portable binary to distribute, use
+  `make release` (needs [Zig](https://ziglang.org/download/)
+  as a C toolchain).
 - [`windows_gui/`](windows_gui) - Windows GUI logger, same recording logic as
   the CLI. Build with `build.bat` (needs [Zig](https://ziglang.org/download/)
   as a C toolchain) or `make`, producing `MousePlotter-Log.exe`.

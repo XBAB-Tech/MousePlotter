@@ -1,0 +1,5 @@
+zig-*/
+linux_cli/mouseplotter-log
+*.csv
+windows_gui/log.o
+windows_gui/MousePlotter-Log.exe

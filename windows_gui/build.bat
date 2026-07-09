@@ -21,7 +21,7 @@ REM (runs on Windows 7 through 11 with nothing installed).
 "!ZIG!" cc -c "%~dp0log.c" -o "%~dp0log.o" -O2 -fno-stack-protector
 if errorlevel 1 ( echo [error] Compile failed. & exit /b 1 )
 "!ZIG!" cc "%~dp0log.o" -o "%~dp0MousePlotter-Log.exe" -nostdlib ^
-  -Wl,--subsystem,windows ^
+  -Wl,--subsystem,windows -Wl,--strip-all ^
   -lkernel32 -luser32 -lgdi32 -lcomdlg32 -lwinmm -lpowrprof
 if errorlevel 1 ( echo [error] Link failed. & exit /b 1 )
 del "%~dp0log.o" >nul 2>nul
