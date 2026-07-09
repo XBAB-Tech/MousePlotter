@@ -568,7 +568,6 @@ async function importCsvFile(file) {
     my: parsed.my,
   });
   resetCrop();
-  statusIndicator.textContent = `Imported ${parsed.ts.length} samples`;
   renderPlot(true);
 }
 
