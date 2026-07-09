@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -32,14 +32,14 @@ jobs:
           tar -C linux_cli -czf "dist/mouseplotter-log-${VERSION}-linux-x86_64.tar.gz" mouseplotter-log LICENSE
           cp windows_gui/MousePlotter-Log.exe "dist/MousePlotter-Log-${VERSION}-windows-x86_64.exe"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binaries
           path: dist/*
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
