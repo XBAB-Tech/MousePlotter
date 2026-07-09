@@ -1,0 +1,45 @@
+// SPDX-FileCopyrightText: 2026 XBAB Tech, LLC
+// SPDX-License-Identifier: MIT
+//
+// icon.ico is rendered from public/assets/icons/favicon.svg (16/24/32 px) and
+// public/assets/icons/logo.svg (48 px and up).
+
+#include <windows.h>
+#include "resource.h"
+
+IDI_APPICON ICON "icon.ico"
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
+
+// Keep in sync with app.manifest and the release tag.
+#define VER_NUM  0,1,0,0
+#define VER_STR  "0.1.0.0"
+
+1 VERSIONINFO
+FILEVERSION    VER_NUM
+PRODUCTVERSION VER_NUM
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0" // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "XBAB Tech, LLC"
+            VALUE "FileDescription",  "MousePlotter mouse data logger"
+            VALUE "FileVersion",      VER_STR
+            VALUE "InternalName",     "MousePlotter-Log"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 XBAB Tech, LLC. MIT licensed."
+            VALUE "OriginalFilename", "MousePlotter-Log.exe"
+            VALUE "ProductName",      "MousePlotter"
+            VALUE "ProductVersion",   VER_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200 // must match the block above
+    END
+END

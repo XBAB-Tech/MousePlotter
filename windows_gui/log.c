@@ -19,8 +19,8 @@
 // This uses no C runtime: the entry point is wWinMainCRTStartup and all
 // formatting / allocation / file I/O go through the Win32 API. As a result the
 // exe imports only core Windows DLLs and runs on Windows 7 through 11 with
-// nothing installed. Build with build.bat or the Makefile (two steps: compile,
-// then link with -nostdlib).
+// nothing installed. Build with build.bat or the Makefile (three steps: compile
+// the resources, compile this, then link with -nostdlib).
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT
@@ -36,6 +36,8 @@
 #include <powrprof.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "resource.h"
 
 // No CRT: LLVM still lowers aggregate initializers (and similar) into memset /
 // memcpy calls, so we must provide them. optnone stops the optimizer from
@@ -487,7 +489,9 @@ void wWinMainCRTStartup(void) {
 
     // Render at true device pixels so text stays sharp on scaled displays, then
     // read the system DPI so the window and fonts are scaled up to match.
-    // SetProcessDPIAware exists on Windows Vista and later.
+    // app.manifest already declares us system-DPI-aware, which is what actually
+    // takes effect; this call is the fallback for a build without the resources
+    // and is a harmless no-op otherwise.
     SetProcessDPIAware();
     HDC screen = GetDC(NULL);
     g_dpi = GetDeviceCaps(screen, LOGPIXELSX);
@@ -504,6 +508,13 @@ void wWinMainCRTStartup(void) {
     wc.hInstance = hInst;
     wc.lpszClassName = L"MousePlotterWin";
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+    // Title bar and Alt-Tab want different sizes out of the icon group; asking
+    // for each by name beats letting Windows stretch one. Both are NULL, and the
+    // default icon appears, if this was built without log.rc.
+    wc.hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+    wc.hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     RegisterClassExW(&wc);
 
     // Non-resizable window (no maximize / thick border), sized in DPI-scaled px.

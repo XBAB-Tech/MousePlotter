@@ -2,4 +2,6 @@ zig-*/
 linux_cli/mouseplotter-log
 *.csv
 windows_gui/log.o
+windows_gui/log.res
 windows_gui/MousePlotter-Log.exe
+windows_gui/MousePlotter-Log.pdb
