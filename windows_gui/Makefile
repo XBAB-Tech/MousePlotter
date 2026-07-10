@@ -1,17 +1,19 @@
 ZIG ?= zig
+PYTHON ?= python3
 TARGET ?= x86_64-windows-gnu
 
 # Keep in sync with build.bat.
 CFLAGS = -O3 -fno-stack-protector
-LDFLAGS = -municode -Wl,--subsystem,windows
-LIBS = -lkernel32 -luser32 -lgdi32 -lcomdlg32 -lwinmm
+LDFLAGS = -municode -Wl,--subsystem,windows -Wl,--strip-all
+LIBS = -lkernel32 -luser32 -lgdi32 -lshell32 -lcomdlg32 -lwinmm
 
 .PHONY: all clean
 
 all:
+	$(PYTHON) ../tools/build_report_template.py
 	$(ZIG) rc /fo log.res log.rc
 	$(ZIG) cc -target $(TARGET) -c log.c -o log.o $(CFLAGS)
-	$(ZIG) cc -target $(TARGET) log.o log.res -o MousePlotter-Log.exe $(LDFLAGS) $(LIBS)
+	$(ZIG) cc -target $(TARGET) log.o log.res -o MousePlotter.exe $(LDFLAGS) $(LIBS)
 
 clean:
-	rm -f log.o log.res MousePlotter-Log.exe MousePlotter-Log.pdb
+	rm -f log.o log.res MousePlotter.exe MousePlotter.pdb

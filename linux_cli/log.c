@@ -5,8 +5,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <grp.h>
 #include <limits.h>
 #include <inttypes.h>
+#include <pwd.h>
 #include <stdint.h>
 #include <signal.h>
 #include <stdio.h>
@@ -25,6 +27,13 @@
 
 struct sample { int dx, dy; int64_t t_ev, t_user; };
 struct chunk  { struct sample data[CHUNK_CAP]; size_t sz; struct chunk *next; };
+
+// HTML report template halves, embedded verbatim by blob.S. A report file is
+// head + the exact CSV byte stream + tail: the CSV lands inside a
+// <script type="application/csv"> data block that the inlined web app plots
+// on load. Built by tools/build_report_template.py.
+extern const char report_head[], report_head_end[];
+extern const char report_tail[], report_tail_end[];
 
 static volatile sig_atomic_t g_intr = 0;
 static void on_signal(int sig) { (void)sig; g_intr = 1; }
@@ -175,7 +184,91 @@ static int choose_device(char *out, size_t sz) {
     return 0;
 }
 
+// CSV in the MousePlotter / MouseTester format the web app imports; its parser
+// reads columns 0-2, so a report plots eventTime and carries userTime unused.
+static void write_csv(FILE *fp, const struct chunk *head) {
+    fprintf(fp, "MousePlotter CLI logger\n800\nxCount,yCount,eventTime (ms),userTime (ms)\n");
+    int64_t t0_ev   = head->data[0].t_ev;
+    int64_t t0_user = head->data[0].t_user;
+    for (const struct chunk *c = head; c; c = c->next) {
+        for (size_t j = 0; j < c->sz; j++) {
+            int64_t de = c->data[j].t_ev   - t0_ev;
+            int64_t du = c->data[j].t_user - t0_user;
+            fprintf(fp, "%d,%d,%" PRId64 ".%06" PRId64 ",%" PRId64 ".%06" PRId64 "\n",
+                c->data[j].dx, c->data[j].dy,
+                de / 1000000, de % 1000000,
+                du / 1000000, du % 1000000);
+        }
+    }
+}
+
+// Under sudo this process runs as root, so everything it creates would come
+// out root-owned and the invoking user couldn't delete their own logs.
+static void chown_to_invoker(const char *path) {
+    const char *su = getenv("SUDO_UID");
+    const char *sg = getenv("SUDO_GID");
+    if (geteuid() != 0 || !su || !sg) return;
+    if (chown(path, (uid_t)strtoul(su, NULL, 10), (gid_t)strtoul(sg, NULL, 10)) != 0)
+        fprintf(stderr, "[warn] chown %s: %s\n", path, strerror(errno));
+}
+
+// Open the report in the user's browser. Under sudo a root xdg-open either
+// fails (DISPLAY/XDG_RUNTIME_DIR are not in the sudo env) or runs the browser
+// as root, so the child drops back to the invoking user and rebuilds the two
+// environment variables xdg-open needs. SIGCHLD is ignored, so no zombie.
+static void open_report(const char *path) {
+    signal(SIGCHLD, SIG_IGN);
+    if (fork() != 0) return; // parent (or failed fork): nothing more to do
+
+    // Detach from the terminal: fds 0-2 onto /dev/null so browser chatter
+    // stays out of it, a new session so closing it can't HUP the browser.
+    // The real stderr survives on a CLOEXEC fd, reachable by the exec-failed
+    // warning below but never by the browser.
+    int err_fd = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 3);
+    setsid();
+    int devnull = open("/dev/null", O_RDWR);
+    if (devnull >= 0) {
+        dup2(devnull, STDIN_FILENO);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO) close(devnull);
+    }
+
+    if (geteuid() == 0) {
+        // Root with no known non-root target (bare `su`, a root cron job,
+        // SUDO_UID/GID stripped from the environment) has no safe user to
+        // drop to. Refuse rather than ever exec the browser as root.
+        const char *su = getenv("SUDO_UID");
+        const char *sg = getenv("SUDO_GID");
+        if (!su || !sg) {
+            if (err_fd >= 0)
+                dprintf(err_fd, "[warn] running as root with no SUDO_UID/SUDO_GID; "
+                                "not opening the browser as root\n");
+            _exit(127);
+        }
+        uid_t uid = (uid_t)strtoul(su, NULL, 10);
+        gid_t gid = (gid_t)strtoul(sg, NULL, 10);
+        const struct passwd *pw = getpwuid(uid);
+        if (pw) initgroups(pw->pw_name, gid); // best effort, needs root
+        if (setgid(gid) != 0 || setuid(uid) != 0)
+            _exit(127); // never launch the browser as root
+        // setuid() from euid 0 drops the real/effective/saved uid together,
+        // so this is a permanent, unrecoverable drop -- not just for exec.
+        if (geteuid() == 0 || getuid() == 0)
+            _exit(127); // paranoia: refuse to proceed if root wasn't shed
+        if (pw && pw->pw_dir) setenv("HOME", pw->pw_dir, 1);
+        char runtime[64];
+        snprintf(runtime, sizeof runtime, "/run/user/%u", (unsigned)uid);
+        setenv("XDG_RUNTIME_DIR", runtime, 1);
+    }
+    execlp("xdg-open", "xdg-open", path, (char *)NULL);
+    if (err_fd >= 0)
+        dprintf(err_fd, "[warn] exec xdg-open: %s\n", strerror(errno));
+    _exit(127);
+}
+
 int main(void) {
+    char html_path[64] = ""; // set when a report should open after cleanup
     char dev_buf[PATH_MAX];
     if (choose_device(dev_buf, sizeof dev_buf) != 0) return 1;
     const char *dev = dev_buf;
@@ -272,37 +365,58 @@ int main(void) {
         goto cleanup;
     }
 
-    char fname[PATH_MAX] = "log.csv";
-    if (isatty(STDIN_FILENO)) {
-        fprintf(stderr, "Save CSV as [log.csv]: ");
-        char line[PATH_MAX];
+    int want_html = 0;
+    int want_csv = !isatty(STDIN_FILENO); // non-interactive: always keep a CSV
+    if (!want_csv) {
+        fprintf(stderr, "Save %zu samples: [c] CSV  [h] HTML + open  [enter] skip: ", total);
+        char line[32];
         if (fgets(line, sizeof line, stdin)) {
-            line[strcspn(line, "\n")] = '\0';
-            if (line[0]) snprintf(fname, sizeof fname, "%s", line);
+            if (line[0] == 'c' || line[0] == 'C') want_csv = 1;
+            if (line[0] == 'h' || line[0] == 'H') want_html = 1;
         }
     }
 
-    FILE *fp = fopen(fname, "w");
-    if (!fp) {
-        fprintf(stderr, "fopen %s: %s\n", fname, strerror(errno));
-        goto cleanup;
-    }
-    fprintf(fp, "MousePlotter CLI logger\n800\nxCount,yCount,eventTime (ms),userTime (ms)\n");
-
-    int64_t t0_ev   = head->data[0].t_ev;
-    int64_t t0_user = head->data[0].t_user;
-    for (struct chunk *c = head; c; c = c->next) {
-        for (size_t j = 0; j < c->sz; j++) {
-            int64_t de = c->data[j].t_ev   - t0_ev;
-            int64_t du = c->data[j].t_user - t0_user;
-            fprintf(fp, "%d,%d,%" PRId64 ".%06" PRId64 ",%" PRId64 ".%06" PRId64 "\n",
-                c->data[j].dx, c->data[j].dy,
-                de / 1000000, de % 1000000,
-                du / 1000000, du % 1000000);
+    if (want_csv) {
+        char fname[PATH_MAX] = "log.csv";
+        if (isatty(STDIN_FILENO)) {
+            fprintf(stderr, "Save CSV as [log.csv]: ");
+            char line[PATH_MAX];
+            if (fgets(line, sizeof line, stdin)) {
+                line[strcspn(line, "\n")] = '\0';
+                if (line[0]) snprintf(fname, sizeof fname, "%s", line);
+            }
+        }
+        FILE *fp = fopen(fname, "w");
+        if (!fp) {
+            fprintf(stderr, "fopen %s: %s\n", fname, strerror(errno));
+        } else {
+            write_csv(fp, head);
+            fclose(fp);
+            chown_to_invoker(fname);
+            fprintf(stderr, "Saved %zu samples to %s\n", total, fname);
         }
     }
-    fclose(fp);
-    fprintf(stderr, "Saved %zu samples to %s\n", total, fname);
+
+    if (want_html) {
+        char fname[64];
+        time_t now = time(NULL);
+        struct tm tmv;
+        localtime_r(&now, &tmv);
+        strftime(fname, sizeof fname, "MousePlotter-%Y%m%d-%H%M%S.html", &tmv);
+
+        FILE *fp = fopen(fname, "w");
+        if (!fp) {
+            fprintf(stderr, "fopen %s: %s\n", fname, strerror(errno));
+        } else {
+            fwrite(report_head, 1, (size_t)(report_head_end - report_head), fp);
+            write_csv(fp, head);
+            fwrite(report_tail, 1, (size_t)(report_tail_end - report_tail), fp);
+            fclose(fp);
+            chown_to_invoker(fname);
+            fprintf(stderr, "Saved %zu samples to %s\n", total, fname);
+            snprintf(html_path, sizeof html_path, "%s", fname);
+        }
+    }
 
 cleanup:
     while (head) {
@@ -315,5 +429,8 @@ cleanup:
     close(fd);
     if (qos_fd >= 0) close(qos_fd); // releases the PM QoS request
     restore_governor();
+    // Launch the browser only now, with the grab released, the QoS request
+    // dropped, and the governor restored, so the child inherits none of it.
+    if (html_path[0]) open_report(html_path);
     return 0;
 }

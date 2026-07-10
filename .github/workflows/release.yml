@@ -29,8 +29,8 @@ jobs:
         run: |
           mkdir -p dist
           VERSION="${GITHUB_REF_NAME:-dev}"
-          tar -C linux_cli -czf "dist/mouseplotter-log-${VERSION}-linux-x86_64.tar.gz" mouseplotter-log LICENSE
-          cp windows_gui/MousePlotter-Log.exe "dist/MousePlotter-Log-${VERSION}-windows-x86_64.exe"
+          tar -C linux_cli -czf "dist/mouseplotter-${VERSION}-linux-x86_64.tar.gz" mouseplotter LICENSE
+          cp windows_gui/MousePlotter.exe "dist/MousePlotter-${VERSION}-windows-x86_64.exe"
 
       - uses: actions/upload-artifact@v7
         with:

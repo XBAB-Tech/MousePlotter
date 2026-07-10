@@ -11,6 +11,10 @@ IDI_APPICON ICON "icon.ico"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "app.manifest"
 
+// Run tools/build_report_template.py first; the Makefile and build.bat do.
+IDR_REPORT_HEAD RCDATA "../build/report.head.html"
+IDR_REPORT_TAIL RCDATA "../build/report.tail.html"
+
 // Keep in sync with app.manifest and the release tag.
 #define VER_NUM  0,1,0,0
 #define VER_STR  "0.1.0.0"
@@ -31,9 +35,9 @@ BEGIN
             VALUE "CompanyName",      "XBAB Tech, LLC"
             VALUE "FileDescription",  "MousePlotter mouse data logger"
             VALUE "FileVersion",      VER_STR
-            VALUE "InternalName",     "MousePlotter-Log"
+            VALUE "InternalName",     "MousePlotter"
             VALUE "LegalCopyright",   "Copyright (C) 2026 XBAB Tech, LLC. MIT licensed."
-            VALUE "OriginalFilename", "MousePlotter-Log.exe"
+            VALUE "OriginalFilename", "MousePlotter.exe"
             VALUE "ProductName",      "MousePlotter"
             VALUE "ProductVersion",   VER_STR
         END

@@ -7,7 +7,7 @@
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity type="win32"
-                    name="XBABTech.MousePlotter.Log"
+                    name="XBABTech.MousePlotter"
                     version="0.1.0.0"
                     processorArchitecture="*"/>
   <description>MousePlotter mouse data logger</description>

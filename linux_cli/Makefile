@@ -1,12 +1,18 @@
-.PHONY: all release clean
+.PHONY: all release template clean
 
-all:
-	gcc -O3 -std=c23 -Wall -Wextra -o mouseplotter-log log.c
+PYTHON ?= python3
+
+all: template
+	gcc -O3 -std=c23 -Wall -Wextra -o mouseplotter log.c blob.S
 
 ZIG ?= zig
 
-release:
-	$(ZIG) cc -target x86_64-linux-musl -O3 -std=c23 -static -s -Wall -Wextra -o mouseplotter-log log.c
+release: template
+	$(ZIG) cc -target x86_64-linux-musl -O3 -std=c23 -static -s -Wall -Wextra -o mouseplotter log.c blob.S
+
+# blob.S embeds the ../build/ output of this script.
+template:
+	$(PYTHON) ../tools/build_report_template.py
 
 clean:
-	rm -f mouseplotter-log
+	rm -f mouseplotter

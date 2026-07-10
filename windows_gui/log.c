@@ -30,6 +30,8 @@
 
 #include <windows.h>
 #include <commdlg.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #include <timeapi.h>
 #include <powrprof.h>
 #include <stddef.h>
@@ -57,8 +59,8 @@ static struct {
     LONG last_abs_x, last_abs_y;
     HANDLE power_req;
     int timer_period_set;
-    int saving;              // Save dialog open: ignore input during its modal loop
     int cursor_hidden;       // cursor currently confined + hidden for a recording
+    int saving;              // Save-CSV dialog open: ignore input during its modal loop
     wchar_t msg[512];        // last status message (save result, etc.)
 } G;
 
@@ -202,18 +204,80 @@ static const wchar_t *basename_w(const wchar_t *s) {
     return b;
 }
 
-static void do_save_csv(void) {
-    wchar_t path[MAX_PATH] = L"log.csv";
+// HTML goes to a timestamped MousePlotter-YYYYmmdd-HHMMSS.html file next to
+// the exe, falling back to Documents when that location is read-only (Program
+// Files, a mounted ISO), and opens immediately -- H must stay a single
+// keypress with no dialog. CSV instead asks where to save (see save_csv()),
+// since unlike the HTML there's no follow-up action that needs a known path.
+
+// Directory containing the running exe, with a trailing '\'; empty on failure.
+static void exe_dir(wchar_t *dir, size_t cap) {
+    DWORD n = GetModuleFileNameW(NULL, dir, (DWORD)cap);
+    if (n == 0 || n >= cap) {
+        dir[0] = 0;
+        return;
+    }
+    wchar_t *cut = dir; // keep everything up to and including the last '\'
+    for (wchar_t *p = dir; *p; p++)
+        if (*p == L'\\' || *p == L'/') cut = p + 1;
+    *cut = 0;
+}
+
+// Create "<dir>\MousePlotter-<stamp>.<ext>"; on success, path holds the name.
+static HANDLE create_stamped(wchar_t *path, size_t cap,
+                             const wchar_t *dir, const wchar_t *ext) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    if ((size_t)wsprintfW(path, L"%sMousePlotter-%04u%02u%02u-%02u%02u%02u.%s",
+                          dir, st.wYear, st.wMonth, st.wDay,
+                          st.wHour, st.wMinute, st.wSecond, ext) >= cap)
+        return INVALID_HANDLE_VALUE;
+    return CreateFileW(path, GENERIC_WRITE, 0, NULL,
+                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+}
+
+static HANDLE create_output(wchar_t *path, size_t cap, const wchar_t *ext) {
+    wchar_t dir[MAX_PATH];
+    exe_dir(dir, MAX_PATH);
+
+    HANDLE h = create_stamped(path, cap, dir, ext);
+    if (h != INVALID_HANDLE_VALUE || GetLastError() != ERROR_ACCESS_DENIED)
+        return h;
+
+    wchar_t docs[MAX_PATH];
+    if (SHGetFolderPathW(NULL, CSIDL_PERSONAL, NULL, SHGFP_TYPE_CURRENT, docs) != S_OK)
+        return INVALID_HANDLE_VALUE;
+    lstrcatW(docs, L"\\");
+    return create_stamped(path, cap, docs, ext);
+}
+
+// Wraps the modal Save dialog so raw input (including clicks inside the
+// dialog itself) is ignored for its whole duration -- see G.saving in WndProc.
+static void save_csv(void) {
+    wchar_t dir[MAX_PATH];
+    exe_dir(dir, MAX_PATH);
+
+    wchar_t path[MAX_PATH] = L"";
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wsprintfW(path, L"MousePlotter-%04u%02u%02u-%02u%02u%02u.csv",
+              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
     OPENFILENAMEW ofn = {0};
     ofn.lStructSize = sizeof ofn;
     ofn.hwndOwner = g_hwnd;
     ofn.lpstrFilter = L"CSV files\0*.csv\0All files\0*.*\0";
     ofn.lpstrFile = path;
     ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrInitialDir = dir[0] ? dir : NULL;
     ofn.lpstrDefExt = L"csv";
     ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (!GetSaveFileNameW(&ofn)) {
-        wsprintfW(G.msg, L"Press S to save.");
+
+    G.saving = 1;
+    BOOL ok = GetSaveFileNameW(&ofn);
+    G.saving = 0;
+    if (!ok) {
+        wsprintfW(G.msg, L"Press C to save CSV, H to save and view HTML.");
         return;
     }
 
@@ -229,12 +293,40 @@ static void do_save_csv(void) {
               (unsigned)G.count, basename_w(path));
 }
 
-// Wrap the modal dialog so raw input (including clicks inside the dialog itself)
-// is ignored for its whole duration, no matter which branch do_save_csv() takes.
-static void save_csv(void) {
-    G.saving = 1;
-    do_save_csv();
-    G.saving = 0;
+// The report template halves live as RCDATA resources; the report file is
+// head blob + the exact CSV byte stream + tail blob. The CSV lands inside the
+// report's <script type="application/csv"> data block, which the inlined web
+// app reads and plots on load. See tools/build_report_template.py.
+static const void *load_blob(int id, DWORD *len) {
+    HRSRC r = FindResourceW(NULL, MAKEINTRESOURCEW(id), (LPCWSTR)RT_RCDATA);
+    HGLOBAL h = r ? LoadResource(NULL, r) : NULL;
+    if (!h) return NULL;
+    *len = SizeofResource(NULL, r);
+    return LockResource(h);
+}
+
+static void save_html_and_open(void) {
+    DWORD head_len, tail_len;
+    const void *head = load_blob(IDR_REPORT_HEAD, &head_len);
+    const void *tail = load_blob(IDR_REPORT_TAIL, &tail_len);
+    if (!head || !tail) {
+        wsprintfW(G.msg, L"Report template resources are missing.");
+        return;
+    }
+
+    wchar_t path[MAX_PATH + 64];
+    HANDLE h = create_output(path, MAX_PATH + 64, L"html");
+    if (h == INVALID_HANDLE_VALUE) {
+        wsprintfW(G.msg, L"Could not open file for writing.");
+        return;
+    }
+    write_all(h, head, (int)head_len);
+    write_csv_file(h);
+    write_all(h, tail, (int)tail_len);
+    CloseHandle(h);
+    wsprintfW(G.msg, L"Saved %u samples to %s",
+              (unsigned)G.count, basename_w(path));
+    ShellExecuteW(NULL, L"open", path, NULL, NULL, SW_SHOWNORMAL);
 }
 
 // --------------------------------------------------------------------------
@@ -286,20 +378,20 @@ static void start_recording(enum start_src src) {
     UpdateWindow(g_hwnd);
 }
 
+// Stops the session and shows the counts; saving is a separate keypress, so
+// the browser launched by H never overlaps the recording state (tuning_end()
+// has long since dropped the realtime priority the child would inherit).
 static void stop_recording(void) {
     if (!G.recording) return;
     G.recording = 0;
     G.src = SRC_NONE;
     register_raw_mouse(0);
-    cursor_release(); // restore the pointer before any Save dialog appears
+    cursor_release();
     tuning_end();
-    G.msg[0] = 0;
-    InvalidateRect(g_hwnd, NULL, FALSE);
-    UpdateWindow(g_hwnd); // show the final counts before any modal Save dialog
     if (G.count == 0)
         wsprintfW(G.msg, L"No samples captured.");
     else
-        save_csv();
+        wsprintfW(G.msg, L"Press C to save CSV, H to save and view HTML.");
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
@@ -417,8 +509,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 start_recording(SRC_SPACE);
             else if (G.src == SRC_SPACE)
                 stop_recording();
-        } else if (wp == 'S' && !G.recording && G.count > 0) {
-            save_csv(); // re-open the dialog for the samples still in memory
+        } else if (wp == 'C' && !G.recording && G.count > 0) {
+            save_csv();
+            InvalidateRect(hwnd, NULL, FALSE);
+        } else if (wp == 'H' && !G.recording && G.count > 0) {
+            save_html_and_open();
             InvalidateRect(hwnd, NULL, FALSE);
         } else if (wp == VK_ESCAPE) {
             DestroyWindow(hwnd);
@@ -498,7 +593,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrevInstance, PWSTR pCmdLine, in
 
     // Non-resizable window (no maximize / thick border), sized in DPI-scaled px.
     DWORD styleflags = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT wr = {0, 0, DP(430), DP(190)};
+    RECT wr = {0, 0, DP(480), DP(240)};
     AdjustWindowRect(&wr, styleflags, FALSE);
     g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"MousePlotter Windows logger",
         styleflags, CW_USEDEFAULT, CW_USEDEFAULT,

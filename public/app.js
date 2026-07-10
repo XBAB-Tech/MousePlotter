@@ -25,6 +25,12 @@ const unsupportedNoticeDetail = $("unsupportedNoticeDetail");
 const themeToggleBtn = $("themeToggleBtn");
 const DEFAULT_CSV_FILENAME = "mouseplotter.csv";
 
+// Report mode: this document is a self-contained capture report written by a
+// standalone logger (see tools/build_report_template.py). The recorded data
+// ships in a #embeddedCsv data block; recording is disabled and the record
+// panel's notice overlay points at the live site instead (see initPlatformGate).
+const REPORT_MODE = !!$("embeddedCsv");
+
 const AUTO_PERIOD_LABEL = periodSelect?.options?.[0]?.textContent || "auto";
 const rawSupported = "onpointerrawupdate" in window;
 
@@ -570,9 +576,7 @@ async function trySaveTextFileWithDialog(suggestedName, text) {
   }
 }
 
-async function importCsvFile(file) {
-  if (!file) return;
-  const text = await file.text();
+function importCsvText(text) {
   const parsed = parseCsv(text);
   plotTitle = parsed.title;
 
@@ -588,6 +592,11 @@ async function importCsvFile(file) {
   });
   resetCrop();
   renderPlot(true);
+}
+
+async function importCsvFile(file) {
+  if (!file) return;
+  importCsvText(await file.text());
 }
 
 // ---------------------------------------------------------------------------
@@ -629,6 +638,22 @@ function unsupportedNoticeText(os) {
 }
 
 function initPlatformGate() {
+  // A report has no logger behind the record panel at all, so reuse the
+  // unsupported-browser overlay to point at the live site instead. "Test
+  // anyway" is removed outright (not just hidden): it would only flip
+  // recordingEnabled, and startRecording() always bails out on REPORT_MODE
+  // regardless, so the button can never do anything here.
+  if (REPORT_MODE) {
+    recordingEnabled = false;
+    if (unsupportedNoticeDetail) {
+      unsupportedNoticeDetail.innerHTML = 'For in-browser recording, visit ' +
+        '<a href="https://mouseplotter.xbabtech.com" target="_blank" ' +
+        'rel="noopener">mouseplotter.xbabtech.com</a>.';
+    }
+    forceTestBtn?.remove();
+    if (unsupportedNotice) unsupportedNotice.hidden = false;
+    return;
+  }
   const os = detectOS();
   if (isSupportedPlatform(os, detectBrowser())) return;
 
@@ -662,7 +687,7 @@ async function requestPointerLock() {
 }
 
 async function startRecording(mode = "space") {
-  if (!recordingEnabled) return;
+  if (REPORT_MODE || !recordingEnabled) return;
   index = 0;
   plotTitle = "";
   isRecording = true;
@@ -2296,4 +2321,13 @@ plotResizeObserver.observe(plotDiv);
 applyTheme(currentTheme());
 initPlatformGate();
 updateTimerResolutionUI();
-renderPlot(true);
+if (REPORT_MODE) {
+  try {
+    importCsvText($("embeddedCsv").textContent);
+  } catch (err) {
+    console.error(err);
+    renderPlot(true);
+  }
+} else {
+  renderPlot(true);
+}
