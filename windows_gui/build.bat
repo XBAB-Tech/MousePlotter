@@ -32,7 +32,7 @@ if not defined PY (
 REM Pinned so an arm64 host still builds the x86_64 binary.
 set "TARGET=x86_64-windows-gnu"
 set "CFLAGS=-O3 -fno-stack-protector"
-set "LDFLAGS=-municode -Wl,--subsystem,windows -Wl,--strip-all"
+set "LDFLAGS=-municode -Wl,--subsystem,windows"
 set "LIBS=-lkernel32 -luser32 -lgdi32 -lshell32 -lcomdlg32 -lwinmm"
 
 echo Using: !ZIG!
