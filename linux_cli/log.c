@@ -288,7 +288,16 @@ int main(void) {
     if (ioctl(fd, EVIOCGRAB, &one) < 0)
         fprintf(stderr, "[warn] EVIOCGRAB: %s\n", strerror(errno));
 
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) < 0)
+    // Allocate and pre-fault the first chunk before mlockall so MCL_CURRENT
+    // covers it. MCL_FUTURE is deliberately absent: it would charge every
+    // overflow chunk against RLIMIT_MEMLOCK (8 MiB unprivileged, ~2 chunks)
+    // and kill long recordings; overflow chunks are mlock()ed best-effort.
+    struct chunk *head = malloc(sizeof *head);
+    if (!head) { perror("malloc"); return 1; }
+    memset(head, 0, sizeof *head);
+    struct chunk *tail = head;
+
+    if (mlockall(MCL_CURRENT) < 0)
         fprintf(stderr, "[warn] mlockall: %s\n", strerror(errno));
 
     // PM QoS: keep CPUs out of deep C-states while the fd is open (needs root).
@@ -311,13 +320,8 @@ int main(void) {
     sigaction(SIGTERM, &sa, NULL);
     set_performance_governor();
 
-    struct chunk *head = malloc(sizeof *head);
-    if (!head) { perror("malloc"); return 1; }
-    memset(head, 0, sizeof *head); // pre-fault all pages before recording starts
-    struct chunk *tail = head;
-
     struct input_event evbuf[BATCH];
-    int cur_dx = 0, cur_dy = 0, stop = 0;
+    int cur_dx = 0, cur_dy = 0, stop = 0, mlock_warned = 0;
     fputs("Recording... press any mouse button to stop, Ctrl+C to quit.\n", stderr);
 
     while (!stop) {
@@ -337,7 +341,10 @@ int main(void) {
                 if (tail->sz == CHUNK_CAP) {
                     tail->next = malloc(sizeof *tail);
                     if (!tail->next) { fputs("out of memory\n", stderr); stop = 1; break; }
-                    memset(tail->next, 0, sizeof *tail);
+                    memset(tail->next, 0, sizeof *tail); // pre-fault
+                    if (mlock(tail->next, sizeof *tail) != 0 && !mlock_warned++)
+                        fprintf(stderr, "[warn] mlock chunk: %s (recording continues unlocked; raise ulimit -l)\n",
+                                strerror(errno));
                     tail = tail->next;
                 }
                 tail->data[tail->sz++] = (struct sample){
