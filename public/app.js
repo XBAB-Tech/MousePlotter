@@ -23,6 +23,7 @@ const forceTestBtn = $("forceTestBtn");
 const unsupportedNotice = $("unsupportedNotice");
 const unsupportedNoticeDetail = $("unsupportedNoticeDetail");
 const themeToggleBtn = $("themeToggleBtn");
+const DEFAULT_PLOT_TITLE = "Mouseplotter";
 const DEFAULT_CSV_FILENAME = "mouseplotter.csv";
 
 // Report mode: this document is a self-contained capture report written by a
@@ -120,7 +121,7 @@ const idleText = (statusIndicator?.textContent || "").trim() ||
   "Click & hold or Space";
 let isSyncingX = false;
 let recordingMode = ""; // 'space' or 'mouse'
-let plotTitle = "";
+let plotTitle = DEFAULT_PLOT_TITLE;
 let countsToVelocityScale = NaN;
 // Plot-only crop range (1-based, inclusive). Trims which events are plotted
 // and summarized without touching the recorded data or CSV export. cropEnd
@@ -522,7 +523,7 @@ function serializeCsv() {
   const formatTime = (v) => (Number.isFinite(v) ? v.toFixed(6) : "0.000000");
 
   const titleLine = String(plotTitle || "").replace(/\r?\n/g, " ").trim() ||
-    "MousePlotter";
+    DEFAULT_PLOT_TITLE;
   const lines = [
     titleLine,
     String(Math.round(dpiVal)),
@@ -578,7 +579,7 @@ async function trySaveTextFileWithDialog(suggestedName, text) {
 
 function importCsvText(text) {
   const parsed = parseCsv(text);
-  plotTitle = parsed.title;
+  plotTitle = parsed.title || DEFAULT_PLOT_TITLE;
 
   if (Number.isFinite(parsed.dpi)) {
     dpiInput.value = String(Math.round(parsed.dpi));
@@ -689,7 +690,6 @@ async function requestPointerLock() {
 async function startRecording(mode = "space") {
   if (REPORT_MODE || !recordingEnabled) return;
   index = 0;
-  plotTitle = "";
   isRecording = true;
   recordingMode = mode;
   statusIndicator.textContent = mode === "mouse"
@@ -763,10 +763,17 @@ const BOTTOM_CHART_TOP_PADDING = 10;
 
 const plotHeaderEl = document.createElement("div");
 plotHeaderEl.className = "plot-header";
-const plotTitleEl = document.createElement("div");
-plotTitleEl.className = "plot-title";
-plotTitleEl.style.display = "none";
-plotHeaderEl.append(plotTitleEl);
+const plotTitleInput = document.createElement("input");
+plotTitleInput.className = "plot-title";
+plotTitleInput.type = "text";
+plotTitleInput.value = plotTitle;
+plotTitleInput.maxLength = 120;
+plotTitleInput.setAttribute("aria-label", "Plot title");
+plotTitleInput.title = "Edit plot title";
+plotTitleInput.addEventListener("input", () => {
+  plotTitle = plotTitleInput.value;
+});
+plotHeaderEl.append(plotTitleInput);
 // Keep plot action buttons out of the chart area (they would cover the
 // velocity axis) by hosting them in the header row next to the title.
 const plotActionsEl = document.createElement("div");
@@ -878,7 +885,10 @@ const botChartEl = document.createElement("div");
 botChartEl.className = "plot-chart plot-chart--bottom";
 plotDiv.append(plotHeaderEl, topChartEl, sharedLegendEl, botChartEl);
 plotDiv.addEventListener("contextmenu", (e) => {
-  if (!(e.target instanceof Element) || !e.target.closest("button")) {
+  if (
+    !(e.target instanceof Element) ||
+    !e.target.closest("button, input, textarea, select, [contenteditable='true']")
+  ) {
     e.preventDefault();
   }
 });
@@ -892,6 +902,18 @@ let dtTicks = { linear: true, periodMs: 1 };
 let plotInfoText = "";
 let isSyncingTopY = false;
 let syncTopYRaf = 0;
+
+// Trace visibility is session UI state, not chart state. renderPlot() rebuilds
+// both uPlot instances after data/settings/crop changes, so keeping the values
+// here prevents those rebuilds from silently turning hidden traces back on.
+const traceVisibility = new Map([
+  ["x-counts", true],
+  ["y-counts", true],
+  ["x-velocity", true],
+  ["y-velocity", true],
+  ["dt-raw", true],
+  ["dt-smoothed", true],
+]);
 
 function destroyCharts() {
   cancelAnimationFrame(syncTopYRaf);
@@ -960,8 +982,9 @@ function decimatedPointsFilter(u, seriesIdx, show, gaps) {
   return out;
 }
 
-function markerSeries(label, color, scale, value) {
+function markerSeries(key, label, color, scale, value) {
   return {
+    show: traceVisibility.get(key) !== false,
     label,
     scale,
     stroke: color,
@@ -974,13 +997,15 @@ function markerSeries(label, color, scale, value) {
       filter: decimatedPointsFilter,
     },
     value,
+    mpKey: key,
     mpKind: "marker",
     mpColor: color,
   };
 }
 
-function lineSeries(label, color, scale, value) {
+function lineSeries(key, label, color, scale, value) {
   return {
+    show: traceVisibility.get(key) !== false,
     label,
     scale,
     stroke: color,
@@ -988,6 +1013,7 @@ function lineSeries(label, color, scale, value) {
     spanGaps: true,
     points: { show: false, size: 0, width: 0 },
     value,
+    mpKey: key,
     mpKind: "line",
     mpColor: color,
   };
@@ -1002,6 +1028,7 @@ function getPlotLegendEntries() {
       entries.push({
         chart,
         seriesIdx,
+        key: sr.mpKey,
         label: sr.label,
         color: sr.mpColor ? sr.mpColor() : "#000000",
         kind: sr.mpKind || "line",
@@ -1015,6 +1042,30 @@ function getPlotLegendEntries() {
 function updateLegendButtonState(btn, show) {
   btn.classList.toggle("is-off", !show);
   btn.setAttribute("aria-pressed", show ? "true" : "false");
+}
+
+function visibleScaleRanges(chart) {
+  const ranges = new Map();
+  for (const [key, scale] of Object.entries(chart.scales)) {
+    if (key === "x" || scale.min == null || scale.max == null) continue;
+    ranges.set(key, { min: scale.min, max: scale.max });
+  }
+  return ranges;
+}
+
+function setTraceVisible(entry, show) {
+  const scaleRanges = visibleScaleRanges(entry.chart);
+  traceVisibility.set(entry.key, show);
+
+  // uPlot invalidates a series' scale in setSeries(), even for a visibility
+  // change. Restore every y scale in the same batch so toggling a trace never
+  // changes either the current zoom or the paired counts/velocity range.
+  entry.chart.batch(() => {
+    entry.chart.setSeries(entry.seriesIdx, { show });
+    for (const [key, range] of scaleRanges) {
+      entry.chart.setScale(key, range);
+    }
+  });
 }
 
 function renderSharedLegend() {
@@ -1037,7 +1088,7 @@ function renderSharedLegend() {
     btn.append(swatch, label);
     btn.addEventListener("click", () => {
       const show = entry.chart.series[entry.seriesIdx].show === false;
-      entry.chart.setSeries(entry.seriesIdx, { show });
+      setTraceVisible(entry, show);
       updateLegendButtonState(btn, show);
     });
     sharedLegendEl.append(btn);
@@ -1069,10 +1120,24 @@ function bindMouseDownForZoom(u, target, handler) {
   };
 }
 
+const PLOT_CURSOR_SYNC_KEY = "mouseplotter-stacked-plots";
+const isCursorMoveEvent = (type) => type === "mousemove";
+
 function cursorOpts() {
   return {
     drag: { x: true, y: true },
     dataIdx: nearestNonNullIdx,
+    // Both cursor rules are uPlot's own .u-cursor-x elements. Restrict the
+    // sync channel to mouse movement so zoom/selection events remain owned by
+    // the chart where they started. The charts' different y-scale keys also
+    // keep the sibling horizontal cursor hidden while x is matched by value.
+    sync: {
+      key: PLOT_CURSOR_SYNC_KEY,
+      filters: {
+        pub: isCursorMoveEvent,
+        sub: isCursorMoveEvent,
+      },
+    },
     bind: {
       mousedown: bindMouseDownForZoom,
       // Replace uPlot's zoom-out with a reset to the default ranges,
@@ -1650,10 +1715,10 @@ function makeTopOpts(width, height) {
     },
     series: [
       { label: "t (ms)", value: fmtMs },
-      markerSeries("x counts", COLOR_X, "y", fmtCount),
-      markerSeries("y counts", COLOR_Y, "y", fmtCount),
-      lineSeries("x vel", COLOR_X_SMOOTH, "vel", fmtVel),
-      lineSeries("y vel", COLOR_Y_SMOOTH, "vel", fmtVel),
+      markerSeries("x-counts", "x counts", COLOR_X, "y", fmtCount),
+      markerSeries("y-counts", "y counts", COLOR_Y, "y", fmtCount),
+      lineSeries("x-velocity", "x vel", COLOR_X_SMOOTH, "vel", fmtVel),
+      lineSeries("y-velocity", "y vel", COLOR_Y_SMOOTH, "vel", fmtVel),
     ],
     axes: [
       {
@@ -1704,8 +1769,8 @@ function makeBotOpts(width, height) {
     },
     series: [
       { label: "t (ms)", value: fmtMs },
-      markerSeries("Δt raw", COLOR_DT, "dt", fmtMs),
-      lineSeries("Δt smoothed", COLOR_DT_SMOOTH, "dt", fmtMs),
+      markerSeries("dt-raw", "Δt raw", COLOR_DT, "dt", fmtMs),
+      lineSeries("dt-smoothed", "Δt smoothed", COLOR_DT_SMOOTH, "dt", fmtMs),
     ],
     axes: [
       { scale: "x", label: "time (ms)", border: AXIS_BORDER, ...X_AXIS_OPTS },
@@ -1942,8 +2007,7 @@ function renderPlot(allowEmpty = false) {
   }
 
   destroyCharts();
-  plotTitleEl.textContent = plotTitle;
-  plotTitleEl.style.display = plotTitle ? "" : "none";
+  if (plotTitleInput.value !== plotTitle) plotTitleInput.value = plotTitle;
 
   const sizes = chartSizes();
   topChart = new uPlot(
@@ -2197,7 +2261,14 @@ async function copyPlotPng() {
   }
 }
 
+function isEditableTarget(target) {
+  return target instanceof Element && !!target.closest(
+    "input, textarea, select, [contenteditable='true']",
+  );
+}
+
 window.addEventListener("keydown", (e) => {
+  if (isEditableTarget(e.target)) return;
   if (e.code !== "Space") return;
   e.preventDefault();
   e.stopPropagation();
@@ -2210,6 +2281,7 @@ window.addEventListener("keydown", (e) => {
 }, { capture: true });
 
 window.addEventListener("keyup", (e) => {
+  if (isEditableTarget(e.target)) return;
   if (e.code !== "Space") return;
   e.preventDefault();
   e.stopPropagation();

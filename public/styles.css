@@ -593,12 +593,31 @@ select.stat-value {
 }
 .plot-title {
   grid-column: 2;
+  width: min(28ch, 34vw);
+  min-width: 0;
+  height: 22px;
+  box-sizing: border-box;
   text-align: center;
   font-size: 1rem;
   font-weight: 600;
+  font-family: inherit;
+  line-height: 20px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.plot-title:hover {
+  border-color: var(--border);
+}
+.plot-title:focus {
+  border-color: var(--text);
+  background: var(--surface);
+  outline: none;
 }
 .plot-actions {
   grid-column: 3;
