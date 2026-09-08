@@ -604,7 +604,8 @@ select.stat-value {
 /* uPlot plot scaffold */
 .plot-header {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns:
+    minmax(max-content, 1fr) minmax(0, 60ch) minmax(max-content, 1fr);
   align-items: center;
   min-height: 24px;
   padding-bottom: 0;
@@ -614,8 +615,7 @@ select.stat-value {
 }
 .plot-title {
   grid-column: 2;
-  /* Use most of the room between the crop and PNG controls on wide layouts. */
-  width: min(64ch, 46vw);
+  width: 100%;
   min-width: 0;
   height: 22px;
   box-sizing: border-box;
@@ -632,11 +632,6 @@ select.stat-value {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-@media (max-width: 700px) {
-  .plot-title {
-    width: min(48ch, 34vw);
-  }
 }
 .plot-title:hover {
   border-color: var(--border);
@@ -731,8 +726,10 @@ select.stat-value {
 }
 .save-png-btn,
 .copy-png-btn {
+  flex: 0 0 auto;
   height: 22px;
   padding: 0 8px;
+  white-space: nowrap;
 }
 
 .plot-crop {
