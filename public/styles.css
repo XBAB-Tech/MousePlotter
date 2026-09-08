@@ -593,7 +593,13 @@ select.stat-value {
 }
 .plot-title {
   grid-column: 2;
-  width: min(28ch, 34vw);
+  /* The loggers name their timestamp source in the title, which runs to about
+     44ch ("MousePlotter Windows logger (ETW USB completion)"); 48ch clears that
+     plus the 12px of padding and border. The vw term is what keeps the header
+     from colliding: it is sized so the title, the crop cluster and the PNG
+     buttons still fit side by side down to a 600px viewport, so widen the ch
+     term freely but leave the vw one alone. */
+  width: min(48ch, 34vw);
   min-width: 0;
   height: 22px;
   box-sizing: border-box;

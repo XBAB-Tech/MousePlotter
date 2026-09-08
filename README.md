@@ -22,16 +22,28 @@ sensor quality. Inspired by [MouseTester](https://github.com/microe1/MouseTester
   builds the report template from `public/`). For a portable binary to
   distribute, use `make release` (needs
   [Zig](https://ziglang.org/download/) as a C toolchain).
-- [`windows_gui/`](windows_gui) - Windows GUI logger, same recording logic
-  and save options as the CLI. Build with `build.bat` (needs
-  [Zig](https://ziglang.org/download/) as a C toolchain and Python 3) or
-  `make`, producing `MousePlotter.exe`.
+- [`windows_gui/`](windows_gui) - Windows GUI logger, same recording logic and
+  save options as the CLI. Click with the mouse you want to test to pick it, so
+  that a second pointing device cannot mix into the capture. It asks for
+  administrator rights at launch, and with them opens a real-time Event Tracing
+  for Windows session. It identifies the selected mouse's USB endpoint and pairs
+  its completions with Raw Input in report order. Where supported, controller
+  and interrupter IDs associate the completion with an earlier interrupt event,
+  reducing timestamp jitter from deferred driver work. The CSV includes
+  `eventTime`, `userTime`, and a per-row `timestampSource`; ambiguous samples
+  keep their Raw Input time. Interrupt moderation can batch reports, so shared
+  interrupt times do not resolve their individual USB arrival times. Without
+  administrator rights or a usable USB trace, it saves a 3-column Raw Input CSV.
+  Recording stops on focus loss or device removal.
+  Build with `build.bat` (needs [Zig](https://ziglang.org/download/) as a C
+  toolchain and Python 3) or `make`, producing `MousePlotter.exe`. Run the offline
+  Windows regression tests with `build.bat test` (Zig only, no elevation).
 
 ## License
 
 Root [LICENSE](LICENSE) (AGPL-3.0) covers `public/`. `linux_cli/` and
-`windows_gui/` each carry their own `LICENSE` (MIT), which takes
-precedence for those directories.
+`windows_gui/` each carry their own `LICENSE` (MIT), which takes precedence
+for those directories.
 
 ---
 

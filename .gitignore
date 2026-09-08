@@ -3,6 +3,8 @@ build/
 linux_cli/mouseplotter
 *.csv
 windows_gui/log.o
+windows_gui/etw.o
 windows_gui/log.res
 windows_gui/MousePlotter.exe
 windows_gui/MousePlotter.pdb
+MousePlotter-*.html

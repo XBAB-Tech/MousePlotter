@@ -1,0 +1,9 @@
+# Normalize everything to LF, except the Windows batch scripts, whose
+# interpreter (cmd.exe) expects CRLF.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+*.ico binary
+*.png binary

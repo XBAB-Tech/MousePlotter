@@ -10,6 +10,6 @@
 #define IDI_APPICON 1
 
 // HTML report template halves built by tools/build_report_template.py; the
-// report file is head + CSV + tail (see save_html in log.c).
+// report file is head + CSV + tail (see save_html_and_open in log.c).
 #define IDR_REPORT_HEAD 2
 #define IDR_REPORT_TAIL 3
