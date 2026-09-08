@@ -13,6 +13,9 @@ const dpiInput = $("dpiInput");
 const plotDiv = $("plot");
 const radioRaw = $("radioRaw");
 const rawApiText = $("rawApiText");
+const radioPointerMove = $("radioPointerMove");
+const pointerMoveApiText = $("pointerMoveApiText");
+const sourceSelector = $("sourceSelector");
 const timerResolutionIndicator = $("timerResolutionIndicator");
 const importCsvBtn = $("importCsvBtn");
 const exportCsvBtn = $("exportCsvBtn");
@@ -29,7 +32,7 @@ const DEFAULT_CSV_FILENAME = "mouseplotter.csv";
 // Report mode: this document is a self-contained capture report written by a
 // standalone logger (see tools/build_report_template.py). The recorded data
 // ships in a #embeddedCsv data block; recording is disabled and the record
-// panel's notice overlay points at the live site instead (see initPlatformGate).
+// button points at the live site while the timestamp controls remain available.
 const REPORT_MODE = !!$("embeddedCsv");
 
 const AUTO_PERIOD_LABEL = periodSelect?.options?.[0]?.textContent || "auto";
@@ -123,6 +126,8 @@ let isSyncingX = false;
 let recordingMode = ""; // 'space' or 'mouse'
 let plotTitle = DEFAULT_PLOT_TITLE;
 let countsToVelocityScale = NaN;
+let importedCsv = null;
+let browserEventType = rawSupported ? "pointerrawupdate" : "pointermove";
 // Plot-only crop range (1-based, inclusive). Trims which events are plotted
 // and summarized without touching the recorded data or CSV export. cropEnd
 // stays Infinity ("through the last event") until data is loaded.
@@ -232,6 +237,39 @@ function replaceTriplesFromArrays({ ts, mx, my }) {
   }
 }
 
+function configureBrowserEventControls() {
+  sourceSelector?.setAttribute("aria-label", "Event API");
+  rawApiText.textContent = "pointerrawupdate";
+  pointerMoveApiText.textContent = "pointermove";
+  rawApiText.classList.toggle("unsupported", !rawSupported);
+  radioRaw.disabled = !rawSupported;
+  radioPointerMove.disabled = false;
+  const useRaw = rawSupported && browserEventType === "pointerrawupdate";
+  radioRaw.checked = useRaw;
+  radioPointerMove.checked = !useRaw;
+}
+
+function configureImportedTimeControls(hasKernelTime) {
+  sourceSelector?.setAttribute("aria-label", "Timestamp source");
+  rawApiText.textContent = "kernel event time";
+  pointerMoveApiText.textContent = "user space timestamp";
+  rawApiText.classList.remove("unsupported");
+  radioRaw.disabled = !hasKernelTime;
+  radioPointerMove.disabled = false;
+  radioRaw.checked = hasKernelTime;
+  radioPointerMove.checked = !hasKernelTime;
+}
+
+function applyImportedTimeSource(rerender = true) {
+  if (!importedCsv) return;
+  const ts = importedCsv.hasKernelTime && radioRaw.checked
+    ? importedCsv.kernelTs
+    : importedCsv.userTs;
+  replaceTriplesFromArrays({ ts, mx: importedCsv.mx, my: importedCsv.my });
+  updateTimerResolutionUI(ts);
+  if (rerender) renderPlot(true);
+}
+
 // Best-effort estimate of effective timer resolution (ms) by sampling performance.now().
 function estimatePerfNowResolutionMs(samples = 4000) {
   let prev = performance.now();
@@ -246,12 +284,32 @@ function estimatePerfNowResolutionMs(samples = 4000) {
   return Number.isFinite(minPositive) ? minPositive : NaN;
 }
 
-function updateTimerResolutionUI() {
-  const resMs = estimatePerfNowResolutionMs();
-  if (!Number.isNaN(resMs)) {
+// Imported loggers write milliseconds to six decimal places. The GCD of their
+// positive timestamp deltas, calculated as integer nanoseconds, estimates the
+// observable timestamp quantum without consulting this browser's clock.
+function estimateFileResolutionMs(ts) {
+  const gcd = (a, b) => {
+    while (b) [a, b] = [b, a % b];
+    return a;
+  };
+  let quantumNs = 0;
+  for (let i = 1; i < ts.length; i++) {
+    const deltaNs = Math.round((ts[i] - ts[i - 1]) * 1e6);
+    if (deltaNs <= 0 || !Number.isSafeInteger(deltaNs)) continue;
+    quantumNs = quantumNs ? gcd(quantumNs, deltaNs) : deltaNs;
+    if (quantumNs === 1) break;
+  }
+  return quantumNs > 0 ? quantumNs / 1e6 : NaN;
+}
+
+function updateTimerResolutionUI(fileTimestamps = null) {
+  const resMs = fileTimestamps
+    ? estimateFileResolutionMs(fileTimestamps)
+    : estimatePerfNowResolutionMs();
+  if (Number.isFinite(resMs)) {
     const resUs = resMs * 1000;
     timerResolutionIndicator.textContent = `Timer resolution: ~${
-      resUs.toFixed(resUs < 100 ? 1 : 0)
+      resUs.toLocaleString(undefined, { maximumFractionDigits: 3 })
     } µs`;
   } else {
     timerResolutionIndicator.textContent = "Timer resolution: n/a";
@@ -482,48 +540,75 @@ function parseCsv(text) {
   const dpi = parseFloat((rawLines[1] ?? "").trim());
   const dpiVal = Number.isFinite(dpi) && dpi > 0 ? dpi : NaN;
 
-  // Line 3 (index 2) is the column header, typically "xCount,yCount,Time (ms)".
-  // It's never required: data parsing simply starts at the next line, so files
-  // that omit or alter the header still import.
+  // Line 3 (index 2) names the columns. Three-column files carry one userspace
+  // timestamp. In four-or-more-column files, column 3 is kernel event time and
+  // column 4 is userspace time; later diagnostic columns remain opaque.
+  const headerLine = rawLines[2] ?? "";
+  const hasKernelTime = headerLine.split(",").length >= 4;
 
-  const ts = [];
+  const kernelTs = [];
+  const userTs = [];
   const mx = [];
   const my = [];
+  const rowLines = [];
   for (let i = 3; i < rawLines.length; i++) {
-    const line = rawLines[i].trim();
+    const rawLine = rawLines[i];
+    const line = rawLine.trim();
     if (!line) continue;
     const parts = line.split(",");
-    if (parts.length < 3) continue;
+    if (parts.length < (hasKernelTime ? 4 : 3)) continue;
     const x = parseFloat(parts[0]);
     const y = parseFloat(parts[1]);
-    const t = parseFloat(parts[2]);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(t)) {
+    const eventTime = parseFloat(parts[2]);
+    const userTime = hasKernelTime ? parseFloat(parts[3]) : eventTime;
+    if (
+      !Number.isFinite(x) ||
+      !Number.isFinite(y) ||
+      !Number.isFinite(eventTime) ||
+      !Number.isFinite(userTime)
+    ) {
       continue;
     }
     mx.push(x);
     my.push(y);
-    ts.push(t);
+    if (hasKernelTime) kernelTs.push(eventTime);
+    userTs.push(userTime);
+    rowLines.push(rawLine);
   }
 
   return {
     title,
     dpi: dpiVal,
-    ts: Float64Array.from(ts),
+    headerLine,
+    rowLines,
+    hasKernelTime,
+    kernelTs: hasKernelTime ? Float64Array.from(kernelTs) : null,
+    userTs: Float64Array.from(userTs),
     mx: Float64Array.from(mx),
     my: Float64Array.from(my),
   };
 }
 
 function serializeCsv() {
-  const { ts, mx, my, count } = extractTriples();
   const dpi = parseFloat(dpiInput.value);
   const dpiVal = Number.isFinite(dpi) && dpi > 0 ? dpi : 800;
-
-  const formatCount = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(6));
-  const formatTime = (v) => (Number.isFinite(v) ? v.toFixed(6) : "0.000000");
-
   const titleLine = String(plotTitle || "").replace(/\r?\n/g, " ").trim() ||
     DEFAULT_PLOT_TITLE;
+
+  // Imported rows are kept verbatim so diagnostic columns unknown to the web
+  // app (for example timestampSource) survive an import/export round trip.
+  if (importedCsv) {
+    return [
+      titleLine,
+      String(Math.round(dpiVal)),
+      importedCsv.headerLine,
+      ...importedCsv.rowLines,
+    ].join("\n");
+  }
+
+  const { ts, mx, my, count } = extractTriples();
+  const formatCount = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(6));
+  const formatTime = (v) => (Number.isFinite(v) ? v.toFixed(6) : "0.000000");
   const lines = [
     titleLine,
     String(Math.round(dpiVal)),
@@ -586,11 +671,9 @@ function importCsvText(text) {
   }
   periodSelect.value = "auto";
 
-  replaceTriplesFromArrays({
-    ts: parsed.ts,
-    mx: parsed.mx,
-    my: parsed.my,
-  });
+  importedCsv = parsed;
+  configureImportedTimeControls(parsed.hasKernelTime);
+  applyImportedTimeSource(false);
   resetCrop();
   renderPlot(true);
 }
@@ -639,20 +722,19 @@ function unsupportedNoticeText(os) {
 }
 
 function initPlatformGate() {
-  // A report has no logger behind the record panel at all, so reuse the
-  // unsupported-browser overlay to point at the live site instead. "Test
-  // anyway" is removed outright (not just hidden): it would only flip
-  // recordingEnabled, and startRecording() always bails out on REPORT_MODE
-  // regardless, so the button can never do anything here.
+  // A report has no logger behind the record button. Keep the rest of the panel
+  // available for selecting an imported timestamp source.
   if (REPORT_MODE) {
     recordingEnabled = false;
-    if (unsupportedNoticeDetail) {
-      unsupportedNoticeDetail.innerHTML = 'For in-browser recording, visit ' +
-        '<a href="https://mouseplotter.xbabtech.com" target="_blank" ' +
-        'rel="noopener">mouseplotter.xbabtech.com</a>.';
+    if (statusIndicator) {
+      statusIndicator.classList.add("report-link");
+      statusIndicator.innerHTML =
+        '<a class="report-recording-link" ' +
+        'href="https://mouseplotter.xbabtech.com" target="_blank" ' +
+        'rel="noopener" aria-label="Open in-browser recording at ' +
+        'mouseplotter.xbabtech.com in a new tab">' +
+        'In-browser recording <span aria-hidden="true">↗</span></a>';
     }
-    forceTestBtn?.remove();
-    if (unsupportedNotice) unsupportedNotice.hidden = false;
     return;
   }
   const os = detectOS();
@@ -689,6 +771,9 @@ async function requestPointerLock() {
 
 async function startRecording(mode = "space") {
   if (REPORT_MODE || !recordingEnabled) return;
+  importedCsv = null;
+  configureBrowserEventControls();
+  updateTimerResolutionUI();
   index = 0;
   isRecording = true;
   recordingMode = mode;
@@ -2302,9 +2387,9 @@ function cancelArming() {
 
 statusIndicator.addEventListener("mousedown", (e) => {
   if (e.button !== 0) return; // Only left click
-  e.preventDefault();
   if (isRecording || pendingRecordTimer !== null) return;
   if (!recordingEnabled) return;
+  e.preventDefault();
   requestPointerLock();
   statusIndicator.style.setProperty("--arm-duration", `${RECORD_START_DELAY_MS}ms`);
   statusIndicator.classList.add("arming");
@@ -2328,11 +2413,16 @@ window.addEventListener("mouseup", (e) => {
   }
 });
 
-if (!rawSupported) {
-  radioRaw.disabled = true;
-  radioRaw.checked = false;
-  document.querySelector('input[value="pointermove"]').checked = true;
-  rawApiText.classList.add("unsupported");
+configureBrowserEventControls();
+for (const radio of [radioRaw, radioPointerMove]) {
+  radio.addEventListener("change", () => {
+    if (!radio.checked) return;
+    if (importedCsv) {
+      applyImportedTimeSource();
+    } else {
+      browserEventType = radio === radioRaw ? "pointerrawupdate" : "pointermove";
+    }
+  });
 }
 const rerenderIfIdle = () => !isRecording && renderPlot(true);
 periodSelect.addEventListener("change", rerenderIfIdle);
