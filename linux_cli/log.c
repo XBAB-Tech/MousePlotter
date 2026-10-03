@@ -16,14 +16,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <linux/input.h>
+#include <linux/kd.h>
+#include <linux/major.h>
+#include <linux/vt.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
-// Storage: linked list of fixed-size chunks.
-// Overflow (>CHUNK_CAP samples) is rare, so we just malloc a new chunk; no copying.
+// Storage: a linked list of fixed-size chunks, kept for the session and reused
+// by each recording, plus a spare that prepare_spare() readies between reads.
 #define CHUNK_CAP 131072
 #define BATCH     64
 
@@ -34,12 +39,15 @@ enum start_source  { START_NONE, START_SPACE, START_CLICK };
 
 struct capture {
     enum start_source source;
-    struct chunk *head, *tail;
+    struct chunk *head, *tail, *spare;
+    size_t spare_ready; // bytes of spare faulted in
     size_t count;
     int64_t total_dx, total_dy;
     int cur_dx, cur_dy;
     int discard_report;
+    int fd;
     int grabbed;
+    int grab_warned;
     int storage_failed;
     int mlock_warned;
 };
@@ -53,6 +61,9 @@ extern const char report_tail[], report_tail_end[];
 
 static volatile sig_atomic_t g_intr = 0;
 static void on_signal(int sig) { (void)sig; g_intr = 1; }
+
+// What Esc does when idle: back to the mouse list, unless a DEVICE was given.
+static const char *g_esc_action = "quit";
 
 static struct termios g_term_saved;
 static int g_term_saved_valid;
@@ -86,7 +97,7 @@ static int    gov_globbed;
 static char (*gov_saved)[64];
 
 static void set_performance_governor(void) {
-    if (glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor", 0, NULL, &gov_glob) != 0)
+    if (glob("/sys/devices/system/cpu/cpufreq/policy*/scaling_governor", 0, NULL, &gov_glob) != 0)
         return; // no cpufreq support
     gov_globbed = 1;
     gov_saved = calloc(gov_glob.gl_pathc, sizeof *gov_saved);
@@ -131,14 +142,16 @@ static void restore_governor(void) {
     }
     free(gov_saved);
     globfree(&gov_glob);
-    gov_saved = NULL;
-    gov_globbed = 0;
 }
 
 // Latency tuning is attempted once and kept for the interactive session, so a
 // missing permission or facility is reported only during startup.
 static int tuning_begin(void) {
     set_performance_governor();
+    // A zero latency target leaves only the POLL idle state usable. Systems
+    // that choose the CPU idle states themselves set this to keep their choice.
+    if (getenv("MOUSEPLOTTER_NO_PM_QOS"))
+        return -1;
     int qos_fd = open("/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
     if (qos_fd >= 0) {
         int32_t target = 0;
@@ -153,11 +166,8 @@ static int tuning_begin(void) {
     return -1;
 }
 
-static void tuning_end(int *qos_fd) {
-    if (*qos_fd >= 0) {
-        close(*qos_fd);
-        *qos_fd = -1;
-    }
+static void tuning_end(int qos_fd) {
+    if (qos_fd >= 0) close(qos_fd);
     restore_governor();
 }
 
@@ -193,64 +203,109 @@ static void print_udev_rule(const char *dev) {
     }
 }
 
+// Lists the event-mouse devices and waits for a button press on one of them,
+// or its number on the keyboard. Returns 0 with the chosen device's path in
+// out, 1 on Esc or an interrupt, or -1 if there are no mice.
 static int choose_device(char *out, size_t sz) {
-    glob_t g_id, g_path;
-    int has_id   = (glob("/dev/input/by-id/*-event-mouse",   0, NULL, &g_id)   == 0);
-    int has_path = (glob("/dev/input/by-path/*-event-mouse", 0, NULL, &g_path) == 0);
-
-    if (!has_id && !has_path) {
+    glob_t g;
+    int found = glob("/dev/input/by-id/*-event-mouse", 0, NULL, &g) == 0;
+    if (glob("/dev/input/by-path/*-event-mouse", found ? GLOB_APPEND : 0, NULL, &g) == 0)
+        found = 1;
+    if (!found) {
         fputs("No mice found in /dev/input/by-id/ or /dev/input/by-path/.\n", stderr);
         return -1;
     }
 
-    // Merge: all by-id entries, then by-path entries not already seen (by realpath).
-    size_t cap = (has_id ? g_id.gl_pathc : 0) + (has_path ? g_path.gl_pathc : 0);
-    char **paths        = malloc(cap * sizeof *paths);
-    char (*reals)[PATH_MAX] = malloc(cap * sizeof *reals);
-    if (!paths || !reals) { perror("malloc"); free(paths); free(reals); return -1; }
-    size_t n = 0;
+    int result = -1;
+    char **paths = malloc(g.gl_pathc * sizeof *paths);
+    dev_t *ids = malloc(g.gl_pathc * sizeof *ids);
+    struct pollfd *pfds = malloc((g.gl_pathc + 1) * sizeof *pfds);
+    if (!paths || !ids || !pfds) {
+        perror("malloc");
+        goto done;
+    }
 
-    if (has_id) {
-        for (size_t i = 0; i < g_id.gl_pathc; i++) {
-            paths[n] = g_id.gl_pathv[i];
-            if (!realpath(g_id.gl_pathv[i], reals[n])) reals[n][0] = '\0';
-            n++;
+    // A mouse usually has a by-id and a by-path name: list it once, under the first.
+    size_t n = 0;
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        struct stat st;
+        if (stat(g.gl_pathv[i], &st) != 0) continue;
+        size_t j = 0;
+        while (j < n && ids[j] != st.st_rdev) j++;
+        if (j == n) {
+            ids[n] = st.st_rdev;
+            paths[n++] = g.gl_pathv[i];
         }
     }
-    if (has_path) {
-        for (size_t i = 0; i < g_path.gl_pathc; i++) {
-            char real[PATH_MAX];
-            if (!realpath(g_path.gl_pathv[i], real)) real[0] = '\0';
-            int dup = 0;
-            for (size_t j = 0; j < n && !dup; j++)
-                if (real[0] && strcmp(real, reals[j]) == 0) dup = 1;
-            if (!dup) {
-                paths[n] = g_path.gl_pathv[i];
-                memcpy(reals[n], real, sizeof real);
-                n++;
+
+    fputs("\nMice:\n", stderr);
+    for (size_t i = 0; i < n; i++)
+        fprintf(stderr, "  %zu) %s\n", i + 1, paths[i]);
+    fputs("Click with the mouse to test or press its number (Enter: 1), Esc to quit.\n",
+          stderr);
+
+    // Mice that can't be opened here can still be chosen by number.
+    pfds[0] = (struct pollfd){ .fd = STDIN_FILENO, .events = POLLIN };
+    for (size_t i = 0; i < n; i++)
+        pfds[i + 1] = (struct pollfd){
+            .fd = open(paths[i], O_RDONLY | O_NONBLOCK | O_CLOEXEC),
+            .events = POLLIN,
+        };
+
+    size_t sel = 0, typed = 0;
+    result = 2; // still waiting
+    while (result == 2) {
+        if (poll(pfds, n + 1, -1) < 0) {
+            if (g_intr || errno != EINTR) result = 1;
+            continue;
+        }
+        if (pfds[0].revents) {
+            unsigned char key;
+            if (read(STDIN_FILENO, &key, 1) != 1 || key == 27) {
+                result = 1;
+            } else if (key == '\r' || key == '\n') {
+                sel = typed ? typed - 1 : 0;
+                result = 0;
+            } else if (key >= '0' && key <= '9') {
+                // Pick as soon as another digit can't make a valid number.
+                typed = typed * 10 + (size_t)(key - '0');
+                if (typed == 0 || typed > n) {
+                    typed = 0;
+                } else if (typed * 10 > n) {
+                    sel = typed - 1;
+                    result = 0;
+                }
+            }
+        }
+        for (size_t i = 0; i < n && result == 2; i++) {
+            struct pollfd *p = &pfds[i + 1];
+            if (!p->revents) continue;
+            struct input_event ev[BATCH];
+            ssize_t got;
+            while ((got = read(p->fd, ev, sizeof ev)) > 0)
+                for (size_t k = 0; k < (size_t)got / sizeof *ev; k++)
+                    if (ev[k].type == EV_KEY && ev[k].value == 1 &&
+                        ev[k].code >= BTN_MOUSE && ev[k].code < BTN_JOYSTICK) {
+                        sel = i;
+                        result = 0;
+                    }
+            if (got < 0 && errno != EAGAIN) {
+                close(p->fd); // unplugged: stop watching it
+                p->fd = -1;
             }
         }
     }
+    if (result == 0)
+        snprintf(out, sz, "%s", paths[sel]);
+    for (size_t i = 1; i <= n; i++)
+        if (pfds[i].fd >= 0) close(pfds[i].fd);
 
-    size_t sel = 0;
-    if (n > 1) {
-        fputs("Select device:\n", stderr);
-        for (size_t i = 0; i < n; i++)
-            fprintf(stderr, "  %zu) %s\n", i + 1, paths[i]);
-        fputs("Enter number [1]: ", stderr);
-        fflush(stderr);
-        char line[32];
-        if (fgets(line, sizeof line, stdin) && line[0] != '\n') {
-            size_t choice = (size_t)atoi(line);
-            if (choice >= 1 && choice <= n)
-                sel = choice - 1;
-        }
-    }
-    snprintf(out, sz, "%s", paths[sel]);
-    free(paths); free(reals);
-    if (has_id)   globfree(&g_id);
-    if (has_path) globfree(&g_path);
-    return 0;
+done:
+    free(paths);
+    free(ids);
+    free(pfds);
+    globfree(&g);
+    return result;
 }
 
 // --------------------------------------------------------------------------
@@ -264,28 +319,76 @@ static void free_chunks(struct capture *cap) {
         free(c);
         c = next;
     }
-    cap->head = cap->tail = NULL;
+    free(cap->spare);
 }
 
-static struct chunk *new_chunk(struct capture *cap) {
-    struct chunk *c = malloc(sizeof *c);
-    if (!c) return NULL;
-    memset(c, 0, sizeof *c); // pre-fault before the first sample arrives
-    if (mlock(c, sizeof *c) != 0 && !cap->mlock_warned++)
-        fprintf(stderr, "[warn] mlock chunk: %s "
-                        "(recording continues unlocked; raise ulimit -l)\n",
-                strerror(errno));
+// Faults in and locks the spare chunk's next page. Called once per loop pass,
+// after the batch is timestamped, it readies the next chunk long before the
+// current one fills, so a recording never stops for allocation or page faults.
+static void prepare_spare(struct capture *cap) {
+    if (!cap->spare) {
+        cap->spare = malloc(sizeof *cap->spare);
+        cap->spare_ready = 0;
+        if (!cap->spare) return;
+    }
+    size_t left = sizeof *cap->spare - cap->spare_ready;
+    if (!left) return;
+    size_t len = left < 4096 ? left : 4096;
+    char *page = (char *)cap->spare + cap->spare_ready;
+    if (mlock(page, len) != 0) { // mlock also faults the page in
+        if (!cap->mlock_warned++)
+            fprintf(stderr, "[warn] mlock: %s "
+                            "(recording continues unlocked; raise ulimit -l)\n",
+                    strerror(errno));
+        memset(page, 0, len);
+    }
+    cap->spare_ready += len;
+}
+
+// Returns the spare chunk, fully faulted in, or NULL if out of memory.
+static struct chunk *take_spare(struct capture *cap) {
+    do prepare_spare(cap);
+    while (cap->spare && cap->spare_ready < sizeof *cap->spare);
+    struct chunk *c = cap->spare;
+    cap->spare = NULL;
+    if (c) c->next = NULL;
     return c;
 }
 
-static void show_ready(void) {
-    fputs("Press Space or click and hold to record, Esc to quit.\n", stderr);
+// The device is grabbed only while recording, so between recordings the
+// cursor stays usable, e.g. in the report viewer.
+static void set_grab(struct capture *cap, int on) {
+    if (cap->grabbed == on) return;
+    // EVIOCGRAB reads the argument value itself: any non-NULL pointer grabs,
+    // so ungrabbing must pass NULL, not a pointer to zero.
+    int ok = ioctl(cap->fd, EVIOCGRAB, on ? (void *)1 : NULL) == 0;
+    if (on && !ok) {
+        if (!cap->grab_warned++)
+            fprintf(stderr, "[warn] EVIOCGRAB: %s (cursor will remain active)\n",
+                    strerror(errno));
+        return;
+    }
+    cap->grabbed = on;
 }
 
-static void show_device(const char *mouse) {
-    fprintf(stderr, "Mouse:  %s\n", mouse);
-    fputs("Source: evdev kernel timestamps\n", stderr);
-    show_ready();
+// Clicks start a recording only on a Linux text console that is on screen.
+// Between recordings the device is ungrabbed, so under a display server the
+// click would also reach the desktop, which then never sees the release
+// (grabbed mid-recording) and keeps the button held. The same check ignores
+// clicks while a report viewer has taken over the console's screen.
+static int console_in_front(void) {
+    int mode;
+    struct vt_stat vs;
+    struct stat st;
+    if (ioctl(STDIN_FILENO, KDGETMODE, &mode) != 0 || mode != KD_TEXT) return 0;
+    if (ioctl(STDIN_FILENO, VT_GETSTATE, &vs) != 0) return 0;
+    if (fstat(STDIN_FILENO, &st) != 0 || major(st.st_rdev) != TTY_MAJOR) return 0;
+    return minor(st.st_rdev) == vs.v_active;
+}
+
+static void show_ready(void) {
+    fprintf(stderr, "Press Space %sto record, Esc to %s.\n",
+            console_in_front() ? "or click and hold " : "", g_esc_action);
 }
 
 static void show_actions(const struct capture *cap) {
@@ -307,56 +410,39 @@ static void show_result(const struct capture *cap) {
     show_actions(cap);
 }
 
-static int reset_capture(struct capture *cap) {
-    // Allocate first so a failed restart leaves the previous recording intact.
-    struct chunk *first = new_chunk(cap);
-    if (!first) {
-        fputs("Out of memory. Previous recording retained.\n", stderr);
-        return -1;
-    }
-    free_chunks(cap);
-    cap->head = cap->tail = first;
-    cap->source = START_NONE;
-    cap->count = 0;
-    cap->total_dx = cap->total_dy = 0;
-    cap->cur_dx = cap->cur_dy = 0;
-    cap->discard_report = 0;
-    cap->storage_failed = 0;
-    return 0;
-}
-
-static int start_recording(struct capture *cap, enum start_source source) {
-    if (cap->source != START_NONE) return 0;
-    if ((cap->count || !cap->head) && reset_capture(cap) != 0) return -1;
-    cap->head->sz = 0;
-    cap->head->next = NULL;
+static void start_recording(struct capture *cap, enum start_source source) {
+    if (cap->source != START_NONE) return;
+    // Overwrite the previous recording in the already faulted-in chunks.
     cap->tail = cap->head;
+    cap->head->sz = 0;
     cap->count = 0;
     cap->total_dx = cap->total_dy = 0;
     cap->cur_dx = cap->cur_dy = 0;
-    cap->discard_report = source == START_CLICK;
     cap->storage_failed = 0;
+    cap->discard_report = source == START_CLICK;
+    set_grab(cap, 1);
     cap->source = source;
     fputs("Recording\n", stderr);
-    return 0;
 }
 
 static void stop_recording(struct capture *cap) {
     if (cap->source == START_NONE) return;
     cap->source = START_NONE;
+    set_grab(cap, 0);
     cap->cur_dx = cap->cur_dy = 0;
     show_result(cap);
 }
 
 static int append_sample(struct capture *cap, int64_t t_ev, int64_t t_user) {
     if (cap->tail->sz == CHUNK_CAP) {
-        struct chunk *next = new_chunk(cap);
-        if (!next) {
+        if (!cap->tail->next)
+            cap->tail->next = take_spare(cap); // normally ready already
+        if (!cap->tail->next) {
             cap->storage_failed = 1;
             return -1;
         }
-        cap->tail->next = next;
-        cap->tail = next;
+        cap->tail = cap->tail->next;
+        cap->tail->sz = 0;
     }
     cap->tail->data[cap->tail->sz++] = (struct sample){
         .dx = cap->cur_dx,
@@ -370,14 +456,14 @@ static int append_sample(struct capture *cap, int64_t t_ev, int64_t t_user) {
     return 0;
 }
 
-// CSV in the MousePlotter / MouseTester format the web app imports; its parser
-// reads columns 0-2, so a report plots eventTime and carries userTime unused.
-static int write_csv(FILE *fp, const struct chunk *head) {
+// CSV in the MousePlotter / MouseTester format the web app imports. It plots
+// eventTime, or userTime in its user space timestamp view.
+static int write_csv(FILE *fp, const struct capture *cap) {
     fprintf(fp, "MousePlotter Linux logger (evdev)\n800\n"
                 "xCount,yCount,eventTime (ms),userTime (ms)\n");
     // One monotonic origin preserves the event-to-userspace dispatch delay.
-    int64_t t0_ev = head->data[0].t_ev;
-    for (const struct chunk *c = head; c; c = c->next) {
+    int64_t t0_ev = cap->head->data[0].t_ev;
+    for (const struct chunk *c = cap->head;; c = c->next) {
         for (size_t j = 0; j < c->sz; j++) {
             int64_t de = c->data[j].t_ev   - t0_ev;
             int64_t du = c->data[j].t_user - t0_ev;
@@ -386,6 +472,7 @@ static int write_csv(FILE *fp, const struct chunk *head) {
                 de / 1000000, de % 1000000,
                 du / 1000000, du % 1000000);
         }
+        if (c == cap->tail) break; // later chunks hold older recordings
     }
     return !ferror(fp);
 }
@@ -465,8 +552,7 @@ static int stamped_path(char *path, size_t path_size, const char *extension) {
     return n >= 0 && (size_t)n < path_size;
 }
 
-static int save_capture(const struct capture *cap, int html, int device_fd,
-                        char *path, size_t path_size) {
+static int save_capture(const struct capture *cap, int html, char *path, size_t path_size) {
     if (!stamped_path(path, path_size, html ? "html" : "csv")) {
         fputs("Could not create output filename. Recording retained.\n", stderr);
         return 0;
@@ -482,7 +568,7 @@ static int save_capture(const struct capture *cap, int html, int device_fd,
             fprintf(stderr, "[warn] could not restore raw terminal input: %s\n",
                     strerror(errno));
         struct input_event discard[BATCH];
-        while (read(device_fd, discard, sizeof discard) > 0) {}
+        while (read(cap->fd, discard, sizeof discard) > 0) {}
         if (!got_line || g_intr) return 0;
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] && snprintf(path, path_size, "%s", line) >= (int)path_size) {
@@ -501,7 +587,7 @@ static int save_capture(const struct capture *cap, int html, int device_fd,
     size_t head_size = (size_t)(report_head_end - report_head);
     size_t tail_size = (size_t)(report_tail_end - report_tail);
     if (html && fwrite(report_head, 1, head_size, fp) != head_size) ok = 0;
-    if (ok && !write_csv(fp, cap->head)) ok = 0;
+    if (ok && !write_csv(fp, cap)) ok = 0;
     if (html && ok && fwrite(report_tail, 1, tail_size, fp) != tail_size) ok = 0;
     if (fclose(fp) != 0) ok = 0;
     if (!ok) {
@@ -518,46 +604,23 @@ static void usage(FILE *fp, const char *argv0) {
     fprintf(fp,
             "Usage: %s [-d DEVICE | --device DEVICE] [DEVICE]\n"
             "\n"
-            "With no DEVICE, choose from the detected event-mouse devices.\n"
-            "Controls: Space starts/stops; left-click and hold records.\n"
-            "          Esc stops a recording or exits when idle; Ctrl+C exits.\n",
+            "With no DEVICE, pick the mouse from a list by clicking with it or\n"
+            "pressing its number.\n"
+            "Controls: Space starts/stops. On a Linux text console, left-click\n"
+            "          and hold also records. Esc stops a recording; when idle\n"
+            "          it returns to the mouse list, where (or with DEVICE\n"
+            "          given) it exits. Ctrl+C exits.\n"
+            "\n"
+            "Set MOUSEPLOTTER_NO_PM_QOS to skip the /dev/cpu_dma_latency request,\n"
+            "which limits the CPU idle states to POLL while running.\n",
             argv0);
 }
 
-int main(int argc, char **argv) {
-    const char *device_arg = NULL;
-    if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
-        usage(stdout, argv[0]);
-        return 0;
-    }
-    if (argc == 2 && (!strcmp(argv[1], "-d") || !strcmp(argv[1], "--device"))) {
-        usage(stderr, argv[0]);
-        return 2;
-    }
-    if (argc == 2) device_arg = argv[1];
-    else if (argc == 3 && (!strcmp(argv[1], "-d") || !strcmp(argv[1], "--device")))
-        device_arg = argv[2];
-    else if (argc != 1) {
-        usage(stderr, argv[0]);
-        return 2;
-    }
-
-    // Avoid stdio read-ahead before the UI switches to one-byte terminal reads.
-    setvbuf(stdin, NULL, _IONBF, 0);
-
-    char dev_buf[PATH_MAX];
-    if (device_arg) {
-        if (snprintf(dev_buf, sizeof dev_buf, "%s", device_arg) >= (int)sizeof dev_buf) {
-            fputs("Device path is too long.\n", stderr);
-            return 2;
-        }
-    } else if (choose_device(dev_buf, sizeof dev_buf) != 0) {
-        return 1;
-    }
-    const char *dev = dev_buf;
-
-    // Keep the selected device open for the entire UI session. O_NONBLOCK lets
-    // poll establish exact ready/recording boundaries without a read race;
+// Records from one mouse until Esc while idle, an interrupt or a device error.
+// Returns nonzero on errors.
+static int run_session(const char *dev) {
+    // Keep the device open for the whole session. O_NONBLOCK lets poll
+    // establish exact ready/recording boundaries without a read race;
     // O_CLOEXEC prevents a launched report browser from inheriting the fd.
     int fd = open(dev, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
@@ -565,12 +628,6 @@ int main(int argc, char **argv) {
         print_udev_rule(dev);
         return 1;
     }
-
-    int one = 1;
-    int grabbed = ioctl(fd, EVIOCGRAB, &one) == 0;
-    if (!grabbed)
-        fprintf(stderr, "[warn] EVIOCGRAB: %s (cursor will remain active)\n",
-                strerror(errno));
 
     char mouse_name[256];
     if (ioctl(fd, EVIOCGNAME(sizeof mouse_name), mouse_name) < 0 || !mouse_name[0])
@@ -581,54 +638,25 @@ int main(int argc, char **argv) {
     if (ioctl(fd, EVIOCSCLOCKID, &clk) < 0)
         fprintf(stderr, "[warn] EVIOCSCLOCKID: %s\n", strerror(errno));
 
-    // Allocate and pre-fault the first chunk before mlockall so MCL_CURRENT
-    // covers it. MCL_FUTURE is deliberately absent: it would charge every
-    // overflow chunk against RLIMIT_MEMLOCK (8 MiB unprivileged, ~2 chunks)
-    // and kill long recordings; overflow chunks are mlock()ed best-effort.
-    struct chunk *head = malloc(sizeof *head);
-    if (!head) {
-        perror("malloc");
-        if (grabbed) {
-            int zero = 0;
-            ioctl(fd, EVIOCGRAB, &zero);
-        }
-        close(fd);
-        return 1;
+    struct capture cap = { .fd = fd };
+    cap.head = cap.tail = take_spare(&cap);
+    int status = !cap.head;
+    if (status) {
+        fputs("Out of memory.\n", stderr);
+    } else {
+        fprintf(stderr, "Mouse:  %s\nSource: evdev kernel timestamps\n", mouse_name);
+        show_ready();
     }
-    memset(head, 0, sizeof *head);
-    struct capture cap = {
-        .head = head,
-        .tail = head,
-        .grabbed = grabbed,
-    };
 
-    if (mlockall(MCL_CURRENT) < 0)
-        fprintf(stderr, "[warn] mlockall: %s\n", strerror(errno));
-
-    // Catch Ctrl+C/SIGTERM (no SA_RESTART: read() returns EINTR) so governors get restored.
-    struct sigaction sa = { .sa_handler = on_signal };
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-
-    int status = 0;
-    int qos_fd = tuning_begin();
-    if (terminal_raw() != 0 && isatty(STDIN_FILENO)) {
-        fprintf(stderr, "Could not enable raw terminal input: %s\n", strerror(errno));
-        status = 1;
-        goto cleanup;
-    }
-    show_device(mouse_name);
-
+    int quit = status;
     int stdin_open = 1;
-    int quit = 0;
     struct input_event evbuf[BATCH];
     while (!quit && !g_intr) {
         struct pollfd pfds[2] = {
             { .fd = fd, .events = POLLIN },
             { .fd = stdin_open ? STDIN_FILENO : -1, .events = POLLIN },
         };
-        int ready = poll(pfds, 2, -1);
-        if (ready < 0) {
+        if (poll(pfds, 2, -1) < 0) {
             if (errno == EINTR) continue;
             fprintf(stderr, "poll: %s\n", strerror(errno));
             status = 1;
@@ -659,7 +687,8 @@ int main(int argc, char **argv) {
                 for (size_t i = 0; i < count; i++) {
                     struct input_event *e = &evbuf[i];
                     if (e->type == EV_KEY && e->code == BTN_LEFT) {
-                        if (e->value == 1 && cap.source == START_NONE)
+                        if (e->value == 1 && cap.source == START_NONE &&
+                            console_in_front())
                             start_recording(&cap, START_CLICK);
                         else if (e->value == 0 && cap.source == START_CLICK) {
                             cap.discard_report = 1;
@@ -685,6 +714,7 @@ int main(int argc, char **argv) {
                 }
             }
         }
+        prepare_spare(&cap);
         if (g_intr) break;
 
         if (stdin_open && pfds[1].revents & (POLLIN | POLLHUP)) {
@@ -704,8 +734,6 @@ int main(int argc, char **argv) {
                         stop_recording(&cap);
                     else
                         quit = 1;
-                } else if (key == 3) {
-                    quit = 1;
                 } else if (key == ' ') {
                     if (cap.source == START_NONE)
                         start_recording(&cap, START_SPACE);
@@ -714,12 +742,12 @@ int main(int argc, char **argv) {
                 } else if ((key == 'c' || key == 'C') &&
                            cap.source == START_NONE && cap.count) {
                     char path[PATH_MAX];
-                    save_capture(&cap, 0, fd, path, sizeof path);
+                    save_capture(&cap, 0, path, sizeof path);
                     show_actions(&cap);
                 } else if ((key == 'h' || key == 'H') &&
                            cap.source == START_NONE && cap.count) {
                     char path[PATH_MAX];
-                    if (save_capture(&cap, 1, fd, path, sizeof path)) {
+                    if (save_capture(&cap, 1, path, sizeof path)) {
                         open_report(path);
                     }
                     show_actions(&cap);
@@ -728,15 +756,64 @@ int main(int argc, char **argv) {
         }
     }
 
-cleanup:
-    terminal_restore();
-    if (g_intr) fputs("\nInterrupted; exiting.\n", stderr);
-    if (cap.grabbed) {
-        int zero = 0;
-        ioctl(fd, EVIOCGRAB, &zero);
-    }
-    tuning_end(&qos_fd);
+    set_grab(&cap, 0);
     free_chunks(&cap);
     close(fd);
+    return status;
+}
+
+int main(int argc, char **argv) {
+    const char *device_arg = NULL;
+    if (argc == 2 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
+        usage(stdout, argv[0]);
+        return 0;
+    }
+    if (argc == 2 && (!strcmp(argv[1], "-d") || !strcmp(argv[1], "--device"))) {
+        usage(stderr, argv[0]);
+        return 2;
+    }
+    if (argc == 2) device_arg = argv[1];
+    else if (argc == 3 && (!strcmp(argv[1], "-d") || !strcmp(argv[1], "--device")))
+        device_arg = argv[2];
+    else if (argc != 1) {
+        usage(stderr, argv[0]);
+        return 2;
+    }
+
+    // The CSV filename prompt reads a line with fgets: keep stdio from reading
+    // ahead into the one-byte key reads that follow.
+    setvbuf(stdin, NULL, _IONBF, 0);
+
+    // Lock what is mapped now (code, libraries, stack). MCL_FUTURE is
+    // deliberately absent: it would charge every chunk against RLIMIT_MEMLOCK
+    // (8 MiB unprivileged, ~2 chunks) and kill long recordings; chunks are
+    // mlock()ed best-effort instead.
+    if (mlockall(MCL_CURRENT) < 0)
+        fprintf(stderr, "[warn] mlockall: %s\n", strerror(errno));
+
+    // Catch Ctrl+C/SIGTERM (no SA_RESTART: read() returns EINTR) so governors get restored.
+    struct sigaction sa = { .sa_handler = on_signal };
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    int status = 0;
+    int qos_fd = tuning_begin();
+    if (terminal_raw() != 0 && isatty(STDIN_FILENO)) {
+        fprintf(stderr, "Could not enable raw terminal input: %s\n", strerror(errno));
+        status = 1;
+    } else if (device_arg) {
+        status = run_session(device_arg);
+    } else {
+        g_esc_action = "re-select mouse";
+        char dev[PATH_MAX];
+        int chosen = 0;
+        while (!g_intr && (chosen = choose_device(dev, sizeof dev)) == 0)
+            run_session(dev);
+        status = chosen < 0;
+    }
+
+    terminal_restore();
+    if (g_intr) fputs("\nInterrupted; exiting.\n", stderr);
+    tuning_end(qos_fd);
     return status;
 }
