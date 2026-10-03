@@ -38,6 +38,7 @@ struct chunk  { struct sample data[CHUNK_CAP]; size_t sz; struct chunk *next; };
 enum start_source  { START_NONE, START_SPACE, START_CLICK };
 
 struct capture {
+    const char *name; // the mouse's, for the plot title
     enum start_source source;
     struct chunk *head, *tail, *spare;
     size_t spare_ready; // bytes of spare faulted in
@@ -456,11 +457,12 @@ static int append_sample(struct capture *cap, int64_t t_ev, int64_t t_user) {
     return 0;
 }
 
-// CSV in the MousePlotter / MouseTester format the web app imports. It plots
-// eventTime, or userTime in its user space timestamp view.
+// CSV in the MousePlotter / MouseTester format the web app imports: plot
+// title, DPI, column names, rows. It plots eventTime, or userTime in its user
+// space timestamp view.
 static int write_csv(FILE *fp, const struct capture *cap) {
-    fprintf(fp, "MousePlotter Linux logger (evdev)\n800\n"
-                "xCount,yCount,eventTime (ms),userTime (ms)\n");
+    fprintf(fp, "%s (MousePlotter Linux)\n800\n"
+                "xCount,yCount,eventTime (ms),userTime (ms)\n", cap->name);
     // One monotonic origin preserves the event-to-userspace dispatch delay.
     int64_t t0_ev = cap->head->data[0].t_ev;
     for (const struct chunk *c = cap->head;; c = c->next) {
@@ -633,12 +635,16 @@ static int run_session(const char *dev) {
     if (ioctl(fd, EVIOCGNAME(sizeof mouse_name), mouse_name) < 0 || !mouse_name[0])
         snprintf(mouse_name, sizeof mouse_name, "%.*s",
                  (int)sizeof mouse_name - 1, dev);
+    // The device supplies its name: keep control characters out of the
+    // terminal and the CSV, and "<" out of the HTML report's <script> block.
+    for (char *p = mouse_name; *p; p++)
+        if ((unsigned char)*p < ' ' || *p == '<') *p = '?';
 
     int clk = CLOCK_MONOTONIC;
     if (ioctl(fd, EVIOCSCLOCKID, &clk) < 0)
         fprintf(stderr, "[warn] EVIOCSCLOCKID: %s\n", strerror(errno));
 
-    struct capture cap = { .fd = fd };
+    struct capture cap = { .name = mouse_name, .fd = fd };
     cap.head = cap.tail = take_spare(&cap);
     int status = !cap.head;
     if (status) {

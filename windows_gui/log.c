@@ -267,19 +267,24 @@ static void ticks_ms(int64_t d, int64_t q, int *ms, int *frac6) {
 
 // Name the most-used clock in the CSV/HTML plot title. Per-row source labels
 // retain the details of any fallback; ties favor the earlier kernel source.
-static const char *timestamp_source(void) {
-    if (!G.pair_ok) return "Raw Input";
-    if (G.pairing.interrupts >= G.pairing.completions &&
-        G.pairing.interrupts >= G.pairing.raw) return "ETW xHCI interrupt";
-    return G.pairing.completions >= G.pairing.raw ? "ETW USB completion" : "Raw Input";
+// The plot title line, from the mouse's name. The device supplies the name:
+// keep control characters out of the CSV and "<" out of the HTML report's
+// <script> block.
+static int write_title(HANDLE h) {
+    char name[3 * 56]; // device_name in UTF-8
+    if (WideCharToMultiByte(CP_UTF8, 0, G.device_name, -1, name, sizeof name,
+                            NULL, NULL) == 0)
+        lstrcpyA(name, "unnamed device");
+    for (char *p = name; *p; p++)
+        if ((unsigned char)*p < ' ' || *p == '<') *p = '?';
+    char line[sizeof name + 32];
+    int n = wsprintfA(line, "%s (MousePlotter Windows)\r\n", name);
+    return write_all(h, line, n);
 }
 
 static int write_csv_regular(HANDLE h) {
-    char header[128];
-    int n = wsprintfA(header,
-                      "MousePlotter Windows logger (%s)\r\n800\r\n"
-                      "xCount,yCount,Time (ms)\r\n", timestamp_source());
-    if (!write_all(h, header, n)) return 0;
+    static const char header[] = "800\r\nxCount,yCount,Time (ms)\r\n";
+    if (!write_title(h) || !write_all(h, header, sizeof header - 1)) return 0;
 
     int64_t t0 = G.head->data[0].t, q = G.qpf;
     char row[64];
@@ -295,12 +300,9 @@ static int write_csv_regular(HANDLE h) {
 }
 
 static int write_csv_paired(HANDLE h) {
-    char header[256];
-    int n = wsprintfA(header,
-                      "MousePlotter Windows logger (%s)\r\n800\r\n"
-                      "xCount,yCount,eventTime (ms),userTime (ms),timestampSource\r\n",
-                      timestamp_source());
-    if (!write_all(h, header, n)) return 0;
+    static const char header[] =
+        "800\r\nxCount,yCount,eventTime (ms),userTime (ms),timestampSource\r\n";
+    if (!write_title(h) || !write_all(h, header, sizeof header - 1)) return 0;
 
     const struct etw_time *times = G.pairing.times;
     int64_t q = G.qpf;
