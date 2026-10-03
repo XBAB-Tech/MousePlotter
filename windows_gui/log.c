@@ -342,12 +342,18 @@ static void exe_dir(wchar_t *dir, size_t cap) {
     *basename_w(dir) = 0;
 }
 
-// dir + MousePlotter-YYYYMMDD-HHMMSS.ext; returns -1 when it does not fit.
+// dir + the mouse's name and the time, NAME-YYYYMMDD-HHMMSS.ext, with the
+// characters Windows doesn't allow in file names as "_"; returns -1 when it
+// does not fit.
 static int stamped_path(wchar_t *path, size_t cap, const wchar_t *dir, const wchar_t *ext) {
+    wchar_t name[sizeof G.device_name / sizeof *G.device_name];
+    lstrcpynW(name, G.device_name, (int)(sizeof name / sizeof *name));
+    for (wchar_t *p = name; *p; p++)
+        if (*p < L' ' || wcschr(L"/\\:*?\"<>|", *p)) *p = L'_';
     SYSTEMTIME st;
     GetLocalTime(&st);
-    int n = _snwprintf(path, cap, L"%sMousePlotter-%04u%02u%02u-%02u%02u%02u.%s",
-                       dir, st.wYear, st.wMonth, st.wDay,
+    int n = _snwprintf(path, cap, L"%s%s-%04u%02u%02u-%02u%02u%02u.%s",
+                       dir, name, st.wYear, st.wMonth, st.wDay,
                        st.wHour, st.wMinute, st.wSecond, ext);
     return n < 0 || (size_t)n >= cap ? -1 : 0;
 }

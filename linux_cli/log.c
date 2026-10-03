@@ -544,18 +544,28 @@ static void open_report(const char *path) {
     _exit(127);
 }
 
-static int stamped_path(char *path, size_t path_size, const char *extension) {
+// Default file name: the mouse's name and the time, NAME-YYYYMMDD-HHMMSS.ext.
+// Characters Windows or Linux don't allow in file names become "_", and a long
+// name is cut after 64 bytes, at a character boundary.
+static int stamped_path(char *path, size_t path_size, const char *name,
+                        const char *extension) {
+    char stem[80];
+    size_t n = 0;
+    for (const char *p = name; *p && n < sizeof stem - 1 &&
+                               (n < 64 || ((unsigned char)*p & 0xC0) == 0x80); p++)
+        stem[n++] = strchr("/\\:*?\"<>|", *p) ? '_' : *p;
+    stem[n] = '\0';
     time_t now = time(NULL);
     struct tm tmv;
-    if (!localtime_r(&now, &tmv)) return 0;
-    char stem[48];
-    if (!strftime(stem, sizeof stem, "MousePlotter-%Y%m%d-%H%M%S", &tmv)) return 0;
-    int n = snprintf(path, path_size, "%s.%s", stem, extension);
-    return n >= 0 && (size_t)n < path_size;
+    char when[16];
+    if (!localtime_r(&now, &tmv) || !strftime(when, sizeof when, "%Y%m%d-%H%M%S", &tmv))
+        return 0;
+    int len = snprintf(path, path_size, "%s-%s.%s", stem, when, extension);
+    return len >= 0 && (size_t)len < path_size;
 }
 
 static int save_capture(const struct capture *cap, int html, char *path, size_t path_size) {
-    if (!stamped_path(path, path_size, html ? "html" : "csv")) {
+    if (!stamped_path(path, path_size, cap->name, html ? "html" : "csv")) {
         fputs("Could not create output filename. Recording retained.\n", stderr);
         return 0;
     }
